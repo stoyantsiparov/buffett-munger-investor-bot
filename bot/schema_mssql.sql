@@ -34,7 +34,8 @@ BEGIN
         t212_currency NVARCHAR(16) NOT NULL DEFAULT N'EUR',
         gemini_api_key_enc NVARCHAR(512) NULL,
 
-        -- Личен бюджет и правила на Бъфет/Мънгър (празни по подразбиране за нови приятели)
+        -- Личен бюджет, език ('en' по подразбиране или 'bg') и правила на Бъфет/Мънгър
+        language NVARCHAR(8) NOT NULL DEFAULT N'en',
         monthly_income FLOAT NOT NULL DEFAULT 0.0,
         monthly_invest_budget FLOAT NOT NULL DEFAULT 0.0,
         emergency_buffer_target FLOAT NOT NULL DEFAULT 500.0,

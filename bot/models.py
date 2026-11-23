@@ -45,6 +45,7 @@ class User(Base):
     gemini_api_key_enc = Column(String(512), nullable=True)
 
     # Personal Finance & Buffett/Munger Parameters (default blank for new friends)
+    language = Column(String(8), nullable=False, default="en")  # 'en' (default) or 'bg'
     monthly_income = Column(Float, nullable=False, default=0.0)
     monthly_invest_budget = Column(Float, nullable=False, default=0.0)
     emergency_buffer_target = Column(Float, nullable=False, default=500.0)

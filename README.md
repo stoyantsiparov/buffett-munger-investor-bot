@@ -38,6 +38,7 @@ Most retail investing tools drown you in noisy charts, hype, and short-term pric
 | **📅 Automated Monthly Check (`/monthly_check`)** | Dynamic monthly investment & cash-flow plan delivered automatically on each user's custom payday (`/set_payday` — defaults to the 1st of the month). |
 | **🤝 Synchronized Group Watchlist (`/watchlist`)** | Any user can run `/add_watch TICKER` — the bot computes its Buffett Intrinsic Value & Target Buy price automatically, adds it to the shared list, and broadcasts it to the group. Weekly Monday scans alert everyone when any stock enters its Buy Zone. |
 | **🤖 Conversational Gemini AI Agent (`/ask`)** | Ask natural-language questions (*"Should I reinforce META or open a new position in INTU today?"*) with full live portfolio context + Google Search news. **Zero `.env` access needed for friends:** any user can plug in their own free Google AI Studio key via `/set_gemini_key` (encrypted & auto-deleted from chat). |
+| **🌐 Bilingual UI (`🇬🇧 English` Default + `🇧🇬 Български`)** | Ships in **English by default** for every new/public user, with instant 1-tap switching to **Bulgarian** (menus, valuations, alerts, monthly checks, and AI replies) via `/lang` or `🌐 Language (EN/BG)`. |
 | **☁️ Free 24/7 Cloud Ready** | Works with **PostgreSQL (Neon / Supabase)**, **MSSQL**, and **SQLite** via SQLAlchemy 2.0, ships with a `Dockerfile`, `render.yaml`, and a built-in zero-token `/health` endpoint (`GET`/`HEAD`) for Render Free + UptimeRobot. |
 
 ---
@@ -108,6 +109,7 @@ Whether you host it for yourself, your friend group, or a public investing commu
 | `/set_payday DAY` | Customize the day of month (`1–31`) for automated monthly reports |
 | `/connect_t212 KEY SECRET` | Securely link a Read-Only Trading 212 API key (auto-deletes chat message) |
 | `/set_gemini_key KEY` | Add your own free encrypted Gemini API key without touching `.env` |
+| `/lang [en\|bg]` | Switch interface, alerts & AI Agent between 🇬🇧 English (default) and 🇧🇬 Bulgarian |
 | `/help` | Full interactive user guide inside Telegram |
 
 ---

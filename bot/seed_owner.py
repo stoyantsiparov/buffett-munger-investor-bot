@@ -397,6 +397,9 @@ def seed_owner_profile() -> dict:
     buf_target = float(_get("OWNER_BUFFER_TARGET", "500") or 500.0)
     buf_current = float(_get("OWNER_BUFFER_CURRENT", "0") or 0.0)
     payday_day = int(_get("OWNER_PAYDAY_DAY", "1") or 1)
+    owner_lang = (_get("OWNER_LANGUAGE", "en") or "en").lower()
+    if owner_lang not in ("en", "bg"):
+        owner_lang = "en"
     loan_json_raw = _get("OWNER_LOAN_JSON", "")
 
     with get_session() as session:
@@ -409,6 +412,7 @@ def seed_owner_profile() -> dict:
                 telegram_id=owner_tg_id,
                 username="owner",
                 full_name="Owner",
+                language=owner_lang,
                 t212_api_key_enc=encrypt_secret(t212_key) if t212_key else None,
                 t212_api_secret_enc=encrypt_secret(t212_secret) if t212_secret else None,
                 t212_env=t212_env,

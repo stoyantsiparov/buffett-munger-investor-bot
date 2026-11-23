@@ -1,11 +1,4 @@
-"""Multi-User Warren Buffett & Charlie Munger Telegram Investment Bot & AI Agent.
-
-Features:
-  - 100% dynamic, non-hardcoded monthly investment plan calculated live from each user's Trading 212 pies, loans, and Revolut/cash emergency buffer.
-  - Interactive Top-3 Investment Picker inside /check_alerts (🔔 Топ 3 & Аларми) so users can choose from today's Top 3 Watchlist stocks OR Top 3 underweight positions in their own Trading 212 portfolio.
-  - Built-in conversational Buffett & Munger AI Agent (/ask or free-text questions in chat) with Gemini 4 Hydrogen + Google Search + full live portfolio & Watchlist context.
-  - Shared, synchronized Watchlist across all friends with instant notifications on additions and weekly Monday price checks.
-"""
+"""Bilingual (EN default / BG switchable) Warren Buffett & Charlie Munger Telegram Investment Bot."""
 
 import asyncio
 import calendar
@@ -42,18 +35,22 @@ from bot.buffett_ai import (
     build_dynamic_investment_plan_lines,
     compute_quantitative_buffett_scorecard,
     evaluate_user_portfolio_undervalued,
-    format_bg_ordinal,
     generate_monthly_check_report,
     rank_portfolio_buy_candidates,
-    rank_top3_watchlist_opportunities,
     rank_unified_top3_opportunities,
 )
 from bot.crypto import encrypt_secret
 from bot.db import get_session, init_db
+from bot.i18n import format_ordinal, get_lang, localize_moat
 from bot.market_service import check_watchlist_alerts, fetch_stock_fundamentals
 from bot.models import PortfolioSnapshot, User, UserLoan, WatchlistItem
 from bot.seed_owner import seed_default_watchlist_for_user, seed_owner_profile
-from bot.t212_service import SEMICONDUCTOR_SHORT_TICKERS, format_portfolio_telegram, parse_t212_snapshot, sync_user_portfolio
+from bot.t212_service import (
+    SEMICONDUCTOR_SHORT_TICKERS,
+    format_portfolio_telegram,
+    parse_t212_snapshot,
+    sync_user_portfolio,
+)
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -65,14 +62,27 @@ logger = logging.getLogger("buffett_bot")
 
 
 def get_reply_keyboard(user: User | None = None) -> ReplyKeyboardMarkup:
+    lang = get_lang(user)
     day = user.payday_day if user else 1
-    suffix = format_bg_ordinal(day)
+    ord_str = format_ordinal(day, lang)
+    if lang == "bg":
+        return ReplyKeyboardMarkup(
+            [
+                ["📊 Портфейл (T212)", f"📅 Месечен отчет ({ord_str})"],
+                ["🎯 Watchlist", "🔔 Топ 3 & Аларми"],
+                ["🤖 Бъфет Агент", "💳 Кредит & Бюджет"],
+                ["🔑 Свържи Trading 212", "🌐 Език (EN/BG)"],
+                ["ℹ️ Помощ"],
+            ],
+            resize_keyboard=True,
+        )
     return ReplyKeyboardMarkup(
         [
-            ["📊 Портфейл (T212)", f"📅 Месечен отчет ({suffix})"],
-            ["🎯 Watchlist", "🔔 Топ 3 & Аларми"],
-            ["🤖 Бъфет Агент", "💳 Кредит & Бюджет"],
-            ["🔑 Свържи Trading 212", "ℹ️ Помощ"],
+            ["📊 Portfolio (T212)", f"📅 Monthly Check ({ord_str})"],
+            ["🎯 Watchlist", "🔔 Top 3 & Alerts"],
+            ["🤖 Buffett Agent", "💳 Loans & Budget"],
+            ["🔑 Connect Trading 212", "🌐 Language (EN/BG)"],
+            ["ℹ️ Help"],
         ],
         resize_keyboard=True,
     )
@@ -84,16 +94,9 @@ async def safe_reply(message, text: str, reply_markup=None) -> None:
     for idx, chunk in enumerate(chunks):
         rm = reply_markup if idx == len(chunks) - 1 else None
         try:
-            await message.reply_text(
-                chunk,
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=rm,
-            )
+            await message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN, reply_markup=rm)
         except BadRequest:
-            await message.reply_text(
-                chunk.replace("*", "").replace("`", "").replace("_", ""),
-                reply_markup=rm,
-            )
+            await message.reply_text(chunk.replace("*", "").replace("`", "").replace("_", ""), reply_markup=rm)
 
 
 async def safe_edit(message, text: str, reply_markup=None) -> None:
@@ -124,12 +127,7 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None) -> None:
     for idx, chunk in enumerate(chunks):
         rm = reply_markup if idx == len(chunks) - 1 else None
         try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=chunk,
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=rm,
-            )
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.MARKDOWN, reply_markup=rm)
         except BadRequest:
             await bot.send_message(
                 chat_id=chat_id,
@@ -139,13 +137,12 @@ async def safe_send(bot, chat_id: int, text: str, reply_markup=None) -> None:
 
 
 def get_master_watchlist_owner_id(session) -> int:
-    """Return the owner user_id (1) that holds the shared synchronized Watchlist."""
     owner = session.query(User).order_by(User.id.asc()).first()
     return owner.id if owner else 1
 
 
 def get_or_register_user(tg_user) -> User:
-    """Find user by telegram_id, or bind the seeded owner row on first /start, or create a blank friend profile."""
+    """Find user by telegram_id, bind unclaimed owner row, or create a blank English-default user profile."""
     with get_session() as session:
         user = session.query(User).filter(User.telegram_id == tg_user.id).first()
         if user:
@@ -157,6 +154,9 @@ def get_or_register_user(tg_user) -> User:
             if full_name and user.full_name != full_name:
                 user.full_name = full_name
                 updated = True
+            if not getattr(user, "language", None):
+                user.language = "en"
+                updated = True
             if updated:
                 session.commit()
             return user
@@ -166,19 +166,18 @@ def get_or_register_user(tg_user) -> User:
             unclaimed_owner.telegram_id = tg_user.id
             unclaimed_owner.username = tg_user.username
             unclaimed_owner.full_name = (
-                f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip()
-                or unclaimed_owner.full_name
+                f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip() or unclaimed_owner.full_name
             )
-            unclaimed_owner.payday_day = 13
             session.commit()
             session.refresh(unclaimed_owner)
-            logger.info("Bound seeded owner profile (payday=13) to Telegram ID %s", tg_user.id)
+            logger.info("Bound seeded owner profile to Telegram ID %s", tg_user.id)
             return unclaimed_owner
 
         new_user = User(
             telegram_id=tg_user.id,
             username=tg_user.username,
-            full_name=f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip() or "Инвеститор",
+            full_name=f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip() or "Investor",
+            language="en",
             monthly_income=0.0,
             monthly_invest_budget=0.0,
             emergency_buffer_target=500.0,
@@ -188,12 +187,13 @@ def get_or_register_user(tg_user) -> User:
         session.add(new_user)
         session.commit()
         session.refresh(new_user)
-        logger.info("Created new friend profile (payday=1, blank budget/loans) for Telegram ID %s", tg_user.id)
+        logger.info("Created new user profile (lang=en, payday=1, blank budget/loans) for Telegram ID %s", tg_user.id)
         return new_user
 
 
-def format_watchlist_telegram(session) -> tuple[str, InlineKeyboardMarkup]:
-    """Render the shared, synchronized Watchlist visible to all friends."""
+def format_watchlist_telegram(session, lang: str = "en") -> tuple[str, InlineKeyboardMarkup]:
+    """Render the shared, synchronized Watchlist in 'en' (default) or 'bg'."""
+    is_bg = lang == "bg"
     master_id = get_master_watchlist_owner_id(session)
     items = (
         session.query(WatchlistItem)
@@ -212,11 +212,19 @@ def format_watchlist_telegram(session) -> tuple[str, InlineKeyboardMarkup]:
                 .all()
             )
 
-    lines = [
-        "🎯 *ОБЩ WATCHLIST (БЪФЕТ & МЪНГЪР — СИНХРОНИЗИРАН ЗА ВСИЧКИ)*",
-        "_Когато някой от нас добави компания тук, тя се вижда от всички и следим цената ѝ заедно!_",
-        "",
-    ]
+    lines = (
+        [
+            "🎯 *ОБЩ WATCHLIST (БЪФЕТ & МЪНГЪР — СИНХРОНИЗИРАН ЗА ВСИЧКИ)*",
+            "_Когато някой от нас добави компания тук, тя се вижда от всички и следим цената ѝ заедно!_",
+            "",
+        ]
+        if is_bg
+        else [
+            "🎯 *SHARED BUFFETT & MUNGER WATCHLIST (SYNCED FOR ALL USERS)*",
+            "_When anyone adds an undervalued stock here, everyone sees it and gets buy-zone alerts!_",
+            "",
+        ]
+    )
 
     for w in items:
         sym = "$" if w.currency == "USD" else ("p " if w.currency == "GBX" else "€")
@@ -229,9 +237,9 @@ def format_watchlist_telegram(session) -> tuple[str, InlineKeyboardMarkup]:
         )
 
         if w.last_price is not None and w.last_price <= w.target_buy_price:
-            badge = "🟢 *КУПИ СЕГА*"
+            badge = "🟢 *КУПИ СЕГА*" if is_bg else "🟢 *BUY NOW*"
         elif w.last_price is not None and w.last_price <= w.target_buy_price * 1.15:
-            badge = "🟡 *Близо*"
+            badge = "🟡 *Близо*" if is_bg else "🟡 *Close*"
         else:
             badge = "⏳"
 
@@ -239,25 +247,42 @@ def format_watchlist_telegram(session) -> tuple[str, InlineKeyboardMarkup]:
         if w.notes and w.notes.startswith("👤"):
             added_by = f" | _{w.notes.split('|')[0].strip()}_"
 
+        p_lbl = "Цена" if is_bg else "Price"
         lines.append(
             f"{badge} *#{w.rank_order} `{w.ticker}`* ({w.company_name}){added_by}\n"
-            f"   └ Цена: `{price_str}` | Target Buy: `<= {target_str}` | IV: `{iv_str}`"
+            f"   └ {p_lbl}: `{price_str}` | Target Buy: `<= {target_str}` | IV: `{iv_str}`"
         )
 
-    lines.extend([
-        "",
-        "🤝 *Как да споделиш нова компания с всички в Watchlist-а:*",
-        "• `/add_watch ТИКЪР` — Ботът сам изчислява Вътрешната стойност и Target Buy по Бъфет и известява всички!",
-        "• `/add_watch ТИКЪР TARGET_PRICE [IV_LOW] [IV_HIGH]` — Добавяне с твоя целева цена",
-        "• `/del_watch ТИКЪР` — Премахване на акция от общия списък",
-        "• `/buffett ТИКЪР` — Пълен Бъфет анализ на акцията",
-    ])
+    if is_bg:
+        lines.extend([
+            "",
+            "🤝 *Как да споделиш нова компания с всички в Watchlist-а:*",
+            "• `/add_watch ТИКЪР` — Ботът сам изчислява Вътрешната стойност и Target Buy по Бъфет и известява всички!",
+            "• `/add_watch ТИКЪР TARGET_PRICE [IV_LOW] [IV_HIGH]` — Добавяне с твоя целева цена",
+            "• `/del_watch ТИКЪР` — Премахване на акция от общия списък",
+            "• `/buffett ТИКЪР` — Пълен Бъфет анализ на акцията",
+        ])
+    else:
+        lines.extend([
+            "",
+            "🤝 *Share a new stock with everyone in the Watchlist:*",
+            "• `/add_watch TICKER` — Auto-computes Buffett Intrinsic Value & Target Buy and notifies everyone!",
+            "• `/add_watch TICKER TARGET_PRICE [IV_LOW] [IV_HIGH]` — Add with a custom target buy price",
+            "• `/del_watch TICKER` — Remove a ticker from the shared Watchlist",
+            "• `/buffett TICKER` — Full 10-point Buffett analysis",
+        ])
 
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🔔 Топ 3 днес & Цени на живо", callback_data="act_check_alerts"),
-                InlineKeyboardButton("🤖 Попитай Агента", callback_data="agent_top3"),
+                InlineKeyboardButton(
+                    "🔔 Топ 3 днес & Цени на живо" if is_bg else "🔔 Top 3 Today & Live Prices",
+                    callback_data="act_check_alerts",
+                ),
+                InlineKeyboardButton(
+                    "🤖 Попитай Агента" if is_bg else "🤖 Ask Buffett Agent",
+                    callback_data="agent_top3",
+                ),
             ],
             [
                 InlineKeyboardButton("🧠 INTU", callback_data="buffett_INTU"),
@@ -277,7 +302,10 @@ def build_top3_and_alerts_report(
     latest_snap: PortfolioSnapshot | None,
     portfolio_evals: list[dict] | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Build detailed Buffett Buy Alerts (Watchlist + User's Own Portfolio) + Unified Head-to-Head Top 3 Picker."""
+    """Build detailed Buffett Buy Alerts (Watchlist + User's Own Portfolio) + Unified Top 3 Picker in EN or BG."""
+    lang = get_lang(user)
+    is_bg = lang == "bg"
+
     parsed_snap = None
     if latest_snap and latest_snap.raw_json:
         try:
@@ -285,19 +313,26 @@ def build_top3_and_alerts_report(
         except Exception:
             parsed_snap = None
 
-    unified = rank_unified_top3_opportunities(session, user, latest_snap, portfolio_evals)
+    unified = rank_unified_top3_opportunities(session, user, latest_snap, portfolio_evals, lang=lang)
     unified_top3 = unified["top3"]
-    ranked_port = rank_portfolio_buy_candidates(parsed_snap)
+    ranked_port = rank_portfolio_buy_candidates(parsed_snap, lang=lang)
 
     lines: list[str] = []
 
     # 1. Detailed Buy Alerts in Shared Watchlist
     if triggered:
-        lines.extend([
-            "🔔 *АЛАРМА ЗА ПОКУПКА В ОБЩИЯ БЪФЕТ WATCHLIST!*",
-            "Следните компании са в или под Целевата цена за покупка (Target Buy) с Марж на безопасност:",
-            "",
-        ])
+        if is_bg:
+            lines.extend([
+                "🔔 *АЛАРМА ЗА ПОКУПКА В ОБЩИЯ БЪФЕТ WATCHLIST!*",
+                "Следните компании са в или под Целевата цена за покупка (Target Buy) с Марж на безопасност:",
+                "",
+            ])
+        else:
+            lines.extend([
+                "🔔 *BUY ALERT IN SHARED BUFFETT WATCHLIST!*",
+                "The following businesses are trading at or below Target Buy Price with a Margin of Safety:",
+                "",
+            ])
         for w in triggered[:6]:
             sym = "$" if w.currency == "USD" else ("p " if w.currency == "GBX" else "€")
             discount = (
@@ -305,63 +340,117 @@ def build_top3_and_alerts_report(
                 if (w.intrinsic_value_high and w.last_price)
                 else w.margin_of_safety_pct
             )
-            lines.extend([
-                f"🟢 *#{w.rank_order} `{w.ticker}` ({w.company_name})*",
-                f"   • Текуща цена: `{sym}{w.last_price:,.2f}` <= Target Buy: `{sym}{w.target_buy_price:,.2f}`",
-                f"   • Вътрешна стойност: `{sym}{w.intrinsic_value_low or 0:,.0f} – {sym}{w.intrinsic_value_high or 0:,.0f}` (Отстъпка: `+{discount:.1f}%`)",
-                f"   • Ров: _{w.moat_summary or 'Широк ров'}_",
-                "",
-            ])
+            moat_txt = localize_moat(w.ticker, w.moat_summary, lang)
+            if is_bg:
+                lines.extend([
+                    f"🟢 *#{w.rank_order} `{w.ticker}` ({w.company_name})*",
+                    f"   • Текуща цена: `{sym}{w.last_price:,.2f}` <= Target Buy: `{sym}{w.target_buy_price:,.2f}`",
+                    f"   • Вътрешна стойност: `{sym}{w.intrinsic_value_low or 0:,.0f} – {sym}{w.intrinsic_value_high or 0:,.0f}` (Отстъпка: `+{discount:.1f}%`)",
+                    f"   • Ров: _{moat_txt}_",
+                    "",
+                ])
+            else:
+                lines.extend([
+                    f"🟢 *#{w.rank_order} `{w.ticker}` ({w.company_name})*",
+                    f"   • Current Price: `{sym}{w.last_price:,.2f}` <= Target Buy: `{sym}{w.target_buy_price:,.2f}`",
+                    f"   • Intrinsic Value: `{sym}{w.intrinsic_value_low or 0:,.0f} – {sym}{w.intrinsic_value_high or 0:,.0f}` (Discount: `+{discount:.1f}%`)",
+                    f"   • Moat: _{moat_txt}_",
+                    "",
+                ])
         if len(triggered) > 6:
-            lines.append(f"_...и още {len(triggered) - 6} компании в зоната за покупка (виж 🎯 Watchlist)._")
+            lines.append(
+                f"_...и още {len(triggered) - 6} компании в зоната за покупка (виж 🎯 Watchlist)._"
+                if is_bg
+                else f"_...and {len(triggered) - 6} more stocks in Buy Zone (see 🎯 Watchlist)._"
+            )
             lines.append("")
     else:
-        lines.extend([
-            "🔔 *ПРОВЕРКА НА ЦЕНОВИ АЛАРМИ (WATCHLIST + ТВОЯТ ПОРТФЕЙЛ)*",
-            "_В момента няма нова акция от общия Watchlist под Target Buy цената._",
-            "",
-        ])
+        if is_bg:
+            lines.extend([
+                "🔔 *ПРОВЕРКА НА ЦЕНОВИ АЛАРМИ (WATCHLIST + ТВОЯТ ПОРТФЕЙЛ)*",
+                "_В момента няма нова акция от общия Watchlist под Target Buy цената._",
+                "",
+            ])
+        else:
+            lines.extend([
+                "🔔 *PRICE ALERT SCAN (WATCHLIST + YOUR PORTFOLIO)*",
+                "_No shared Watchlist stock is below its Target Buy Price right now._",
+                "",
+            ])
 
-    # 2. Detailed Undervalued Alerts in the User's OWN Trading 212 Portfolio!
+    # 2. Detailed Undervalued Alerts in User's OWN Trading 212 Portfolio
     if portfolio_evals:
         buy_zone_port = [p for p in portfolio_evals if p["in_buy_zone"] and not p["sector_warn"]]
         fair_disc_port = [p for p in portfolio_evals if (not p["in_buy_zone"]) and p["is_undervalued"] and not p["sector_warn"]]
         blocked_under_port = [p for p in portfolio_evals if p["is_undervalued"] and p["sector_warn"]]
 
-        snap_ts = (
-            f" _(данни: {latest_snap.created_at.strftime('%d.%m.%Y %H:%M')})_"
-            if (latest_snap and latest_snap.created_at)
-            else ""
+        if latest_snap and latest_snap.created_at:
+            snap_ts = (
+                f" _(данни: {latest_snap.created_at.strftime('%d.%m.%Y %H:%M')})_"
+                if is_bg
+                else f" _(synced: {latest_snap.created_at.strftime('%Y-%m-%d %H:%M UTC')})_"
+            )
+        else:
+            snap_ts = ""
+
+        lines.append(
+            f"💼 *ПОДЦЕНЕНИ КОМПАНИИ В ТВОЯ ПОРТФЕЙЛ (TRADING 212):*{snap_ts}"
+            if is_bg
+            else f"💼 *UNDERVALUED STOCKS IN YOUR PORTFOLIO (TRADING 212):*{snap_ts}"
         )
-        lines.append(f"💼 *ПОДЦЕНЕНИ КОМПАНИИ В ТВОЯ ПОРТФЕЙЛ (TRADING 212):*{snap_ts}")
         shown_port = (buy_zone_port + fair_disc_port)[:4]
         if shown_port:
             for p in shown_port:
                 sym = p["currency_sym"]
                 badge = "🟢" if p["in_buy_zone"] else "🟡"
                 cmp_op = "<=" if p["in_buy_zone"] else "vs"
-                lines.extend([
-                    f"{badge} *`{p['ticker']}` ({p['company_name']})* _(Дял: {p['cur_pct']:.1f}% / цел {p['exp_pct']:.0f}%)_",
-                    f"   • Текуща цена: `{sym}{p['last_price']:,.2f}` {cmp_op} Target Buy: `{sym}{p['target_buy_price']:,.2f}`",
-                    f"   • Вътрешна стойност: `{sym}{p['iv_low']:,.0f} – {sym}{p['iv_high']:,.0f}` (Отстъпка: `+{p['discount_pct']:.1f}%`)",
-                    f"   • Ров: _{p['moat_summary']}_",
-                ])
+                moat_txt = localize_moat(p["ticker"], p["moat_summary"], lang)
+                if is_bg:
+                    lines.extend([
+                        f"{badge} *`{p['ticker']}` ({p['company_name']})* _(Дял: {p['cur_pct']:.1f}% / цел {p['exp_pct']:.0f}%)_",
+                        f"   • Текуща цена: `{sym}{p['last_price']:,.2f}` {cmp_op} Target Buy: `{sym}{p['target_buy_price']:,.2f}`",
+                        f"   • Вътрешна стойност: `{sym}{p['iv_low']:,.0f} – {sym}{p['iv_high']:,.0f}` (Отстъпка: `+{p['discount_pct']:.1f}%`)",
+                        f"   • Ров: _{moat_txt}_",
+                    ])
+                else:
+                    lines.extend([
+                        f"{badge} *`{p['ticker']}` ({p['company_name']})* _(Wt: {p['cur_pct']:.1f}% / tgt {p['exp_pct']:.0f}%)_",
+                        f"   • Current Price: `{sym}{p['last_price']:,.2f}` {cmp_op} Target Buy: `{sym}{p['target_buy_price']:,.2f}`",
+                        f"   • Intrinsic Value: `{sym}{p['iv_low']:,.0f} – {sym}{p['iv_high']:,.0f}` (Discount: `+{p['discount_pct']:.1f}%`)",
+                        f"   • Moat: _{moat_txt}_",
+                    ])
         else:
-            lines.append("  • _Всички не-чипови акции в портфейла ти са около или над консервативната си вътрешна стойност днес._")
+            lines.append(
+                "  • _Всички не-чипови акции в портфейла ти са около или над консервативната си вътрешна стойност днес._"
+                if is_bg
+                else "  • _All non-chip holdings in your portfolio are near or above conservative intrinsic value today._"
+            )
 
         if blocked_under_port:
             b_str = ", ".join(f"`{p['ticker']}` (+{p['discount_pct']:.0f}%)" for p in blocked_under_port)
-            lines.append(f"  • ⚠️ _Подценени, но блокирани от лимита за полупроводници (>20%):_ {b_str}")
+            lines.append(
+                f"  • ⚠️ _Подценени, но блокирани от лимита за полупроводници (>20%):_ {b_str}"
+                if is_bg
+                else f"  • ⚠️ _Undervalued, but blocked by semiconductor sector cap (>20%):_ {b_str}"
+            )
         lines.append("")
     elif not user.t212_api_key_enc:
         lines.extend([
-            "💼 *ТВОЯТ ПОРТФЕЙЛ:* _Още не си свързал Trading 212 (`/connect_t212`), затова класирането долу е само от общия Watchlist._",
+            (
+                "💼 *ТВОЯТ ПОРТФЕЙЛ:* _Още не си свързал Trading 212 (`/connect_t212`), затова класирането долу е само от общия Watchlist._"
+                if is_bg
+                else "💼 *YOUR PORTFOLIO:* _Connect Trading 212 (`/connect_t212`) to compare your own holdings head-to-head against the Watchlist._"
+            ),
             "",
         ])
 
-    # 3. UNIFIED HEAD-TO-HEAD TOP 3 (Watchlist vs. User's Own Portfolio!)
+    # 3. Unified Head-to-Head Top 3
     if unified_top3:
-        lines.append("🏆 *ОБЩ ТОП 3 ЗА ИНВЕСТИЦИЯ ДНЕС (WATCHLIST vs. ТВОЯТ ПОРТФЕЙЛ):*")
+        lines.append(
+            "🏆 *ОБЩ ТОП 3 ЗА ИНВЕСТИЦИЯ ДНЕС (WATCHLIST vs. ТВОЯТ ПОРТФЕЙЛ):*"
+            if is_bg
+            else "🏆 *UNIFIED TOP 3 TODAY (WATCHLIST vs. YOUR PORTFOLIO):*"
+        )
         for idx, item in enumerate(unified_top3, 1):
             sym = item["currency_sym"]
             roic_str = f" | ROIC `{item['roic_pct']:.0f}%`" if item["roic_pct"] else ""
@@ -371,47 +460,120 @@ def build_top3_and_alerts_report(
                 f"     └ `{sym}{item['last_price']:,.2f}` | IV `{sym}{item['iv_low']:,.0f}–{sym}{item['iv_high']:,.0f}`{roic_str} — {item['status_tag']}{warn_str}"
             )
         if unified["comparison_insight"]:
-            lines.append(f"💡 *Извод:* {unified['comparison_insight']}")
+            lbl = "💡 *Извод:*" if is_bg else "💡 *Takeaway:*"
+            lines.append(f"{lbl} {unified['comparison_insight']}")
         lines.append("")
 
     if user.emergency_buffer_current < user.emergency_buffer_target:
         missing = user.emergency_buffer_target - user.emergency_buffer_current
-        lines.append(
-            f"🛡️ *Ликвиден буфер:* `€{user.emergency_buffer_current:,.2f}` / `€{user.emergency_buffer_target:,.2f}` "
-            f"_(липсват `€{missing:,.2f}`)_ — не забравяй да заделиш част за Revolut буфера!"
-        )
+        if is_bg:
+            lines.append(
+                f"🛡️ *Ликвиден буфер:* `€{user.emergency_buffer_current:,.2f}` / `€{user.emergency_buffer_target:,.2f}` "
+                f"_(липсват `€{missing:,.2f}`)_ — не забравяй да заделиш част за Revolut буфера!"
+            )
+        else:
+            lines.append(
+                f"🛡️ *Liquidity Buffer:* `€{user.emergency_buffer_current:,.2f}` / `€{user.emergency_buffer_target:,.2f}` "
+                f"_(missing `€{missing:,.2f}`)_ — remember to allocate part of your surplus to your cash buffer!"
+            )
         lines.append("")
 
-    lines.append("👇 *Избери компания от Обединения Топ 3 за готов персонален план за покупка:*")
+    lines.append(
+        "👇 *Избери компания от Обединения Топ 3 за готов персонален план за покупка:*"
+        if is_bg
+        else "👇 *Pick a company from the Unified Top 3 for a personalized buy ticket:*"
+    )
 
     buttons: list[list[InlineKeyboardButton]] = []
     if unified_top3:
         buttons.append(
             [
-                InlineKeyboardButton(
-                    f"{i}️⃣ {x['btn_icon']} {x['ticker']}",
-                    callback_data=f"pick_{x['ticker']}",
-                )
+                InlineKeyboardButton(f"{i}️⃣ {x['btn_icon']} {x['ticker']}", callback_data=f"pick_{x['ticker']}")
                 for i, x in enumerate(unified_top3, 1)
             ]
         )
 
-    # Also offer a 0%-tax broad EU ETF quick-pick if user holds one (e.g. VWCE) and it's not already in Top 3
     top3_tickers = {x["ticker"] for x in unified_top3}
     broad_etf_pick = next(
         (c for c in ranked_port["top_overall"] if c.get("is_broad_etf") and c["ticker"] not in top3_tickers),
         None,
     )
-    row2 = [
-        InlineKeyboardButton("🤖 Сравни: Нова vs Портфейл", callback_data="agent_top3"),
-        InlineKeyboardButton("🔄 Синхронизирай T212", callback_data="act_sync_t212"),
-    ]
     if broad_etf_pick:
-        buttons.append(
-            [InlineKeyboardButton(f"🇪🇺 0% Данък ETF: {broad_etf_pick['ticker']}", callback_data=f"pick_{broad_etf_pick['ticker']}")]
+        etf_lbl = (
+            f"🇪🇺 0% Данък ETF: {broad_etf_pick['ticker']}"
+            if is_bg
+            else f"🇪🇺 Broad EU ETF: {broad_etf_pick['ticker']}"
         )
-    buttons.append(row2)
+        buttons.append([InlineKeyboardButton(etf_lbl, callback_data=f"pick_{broad_etf_pick['ticker']}")])
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "🤖 Сравни: Нова vs Портфейл" if is_bg else "🤖 Compare: New vs Portfolio",
+                callback_data="agent_top3",
+            ),
+            InlineKeyboardButton(
+                "🔄 Синхронизирай T212" if is_bg else "🔄 Sync T212 Live",
+                callback_data="act_sync_t212",
+            ),
+        ]
+    )
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch interface and AI language between English (default) and Bulgarian."""
+    user = get_or_register_user(update.effective_user)
+    args = context.args or []
+
+    if args:
+        choice = args[0].strip().lower()
+        if choice in ("en", "eng", "english"):
+            await _apply_language_change(update.effective_message, user, "en")
+            return
+        if choice in ("bg", "bul", "bulgarian", "бг"):
+            await _apply_language_change(update.effective_message, user, "bg")
+            return
+
+    lang = get_lang(user)
+    cur_label = "🇬🇧 English" if lang == "en" else "🇧🇬 Български"
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🇬🇧 English (Default)", callback_data="lang_en"),
+                InlineKeyboardButton("🇧🇬 Български", callback_data="lang_bg"),
+            ]
+        ]
+    )
+    await safe_reply(
+        update.effective_message,
+        f"🌐 *LANGUAGE / ЕЗИК*\n\n"
+        f"Current language / Текущ език: *{cur_label}*\n\n"
+        "Choose your preferred language below (applies to menus, alerts, reports & AI Agent):",
+        reply_markup=kb,
+    )
+
+
+async def _apply_language_change(message, user: User, new_lang: str) -> None:
+    with get_session() as session:
+        db_user = session.query(User).filter(User.id == user.id).first()
+        db_user.language = new_lang
+        session.commit()
+        session.refresh(db_user)
+
+    if new_lang == "bg":
+        text = (
+            "✅ *Езикът е сменен на 🇧🇬 Български!*\n\n"
+            "Всички менюта, анализи, ценови аларми, месечни отчети и Бъфет AI Агентът вече работят на български. "
+            "По всяко време можеш да смениш обратно с `/lang` или бутона `🌐 Език (EN/BG)`."
+        )
+    else:
+        text = (
+            "✅ *Language switched to 🇬🇧 English!*\n\n"
+            "All menus, valuations, price alerts, monthly reports, and the Buffett AI Agent now operate in English. "
+            "You can switch back anytime via `/lang` or the `🌐 Language (EN/BG)` button."
+        )
+    await safe_reply(message, text, reply_markup=get_reply_keyboard(db_user))
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -421,100 +583,166 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         has_gemini = bool(_get_gemini_api_key(user=db_user, session=session))
         user = db_user
 
-    has_t212 = "✅ Свързан (Read-Only)" if user.t212_api_key_enc else "⚠️ Не е свързан (`/connect_t212`)"
-    gemini_status = "✅ Активен (Gemini AI + живи новини)" if has_gemini else "💡 Количествен режим _(активирай AI с `/set_gemini_key`)_"
-    day_suffix = format_bg_ordinal(user.payday_day)
+    lang = get_lang(user)
+    is_bg = lang == "bg"
+    ord_str = format_ordinal(user.payday_day, lang)
 
-    if user.monthly_income > 0 or user.monthly_invest_budget > 0:
-        buf_warn = (
-            f"⚠️ _(липсват `€{user.emergency_buffer_target - user.emergency_buffer_current:,.2f}`)_"
-            if user.emergency_buffer_current < user.emergency_buffer_target
-            else "✅"
-        )
-        budget_info = (
-            f"💵 *Нетен месечен доход:* `€{user.monthly_income:,.2f}`\n"
-            f"📈 *Месечен бюджет за инвестиции/буфер:* `€{user.monthly_invest_budget:,.2f}` (Отчет: {day_suffix} число)\n"
-            f"🛡️ *Ликвиден буфер:* `€{user.emergency_buffer_current:,.2f}` / цел `€{user.emergency_buffer_target:,.2f}` {buf_warn}"
+    if is_bg:
+        has_t212 = "✅ Свързан (Read-Only)" if user.t212_api_key_enc else "⚠️ Не е свързан (`/connect_t212`)"
+        gemini_status = "✅ Активен (Gemini AI + живи новини)" if has_gemini else "💡 Количествен режим _(активирай AI с `/set_gemini_key`)_"
+        if user.monthly_income > 0 or user.monthly_invest_budget > 0:
+            buf_warn = (
+                f"⚠️ _(липсват `€{user.emergency_buffer_target - user.emergency_buffer_current:,.2f}`)_"
+                if user.emergency_buffer_current < user.emergency_buffer_target
+                else "✅"
+            )
+            budget_info = (
+                f"💵 *Нетен месечен доход:* `€{user.monthly_income:,.2f}`\n"
+                f"📈 *Месечен бюджет за инвестиции/буфер:* `€{user.monthly_invest_budget:,.2f}` (Отчет: {ord_str} число)\n"
+                f"🛡️ *Ликвиден буфер:* `€{user.emergency_buffer_current:,.2f}` / цел `€{user.emergency_buffer_target:,.2f}` {buf_warn}"
+            )
+        else:
+            budget_info = (
+                f"📅 *Месечен отчет:* Автоматично на *{ord_str} число на месеца* _(сменя се с `/set_payday`)_\n"
+                "💡 *Твоят бюджет и кредити са празни (100% лични за теб).* Натисни `💳 Кредит & Бюджет` или `ℹ️ Помощ`!"
+            )
+        welcome = (
+            f"Здравей, *{user.full_name}*! 👋\n\n"
+            "Добре дошъл в интелигентния инвестиционен агент по системата на *Уорън Бъфет и Чарли Мънгър*!\n\n"
+            "🏆 *Обединен Топ 3 (Watchlist vs. Твоят портфейл):* Ботът сравнява на живо *подценените компании в твоя портфейл* срещу *общия Watchlist*, за да знаеш дали днес да подсилиш своя позиция или да добавиш нова!\n"
+            "🔒 *100% Лични финанси:* Твоят Trading 212 портфейл, бюджет, буфер, кредити и API ключове са криптирани и видими САМО за теб.\n"
+            "🤝 *Общ Watchlist:* Списъкът в `🎯 Watchlist` е общ за цялата група!\n\n"
+            f"🔐 *Твоят Trading 212:* {has_t212}\n"
+            f"🤖 *Бъфет AI Агент:* {gemini_status}\n"
+            f"🌐 *Език:* 🇧🇬 Български _(смени на English с `/lang`)_\n"
+            f"{budget_info}\n\n"
+            "Избери бутон от менюто долу, напиши тикър (напр. `INTU`) или ми задай свободен въпрос!"
         )
     else:
-        budget_info = (
-            f"📅 *Месечен отчет:* Автоматично на *{day_suffix} число на месеца* _(сменя се с `/set_payday`)_\n"
-            "💡 *Твоят бюджет и кредити са празни (100% лични за теб).* Натисни `💳 Кредит & Бюджет` или `ℹ️ Помощ`, за да настроиш своите суми!"
+        has_t212 = "✅ Connected (Read-Only)" if user.t212_api_key_enc else "⚠️ Not connected (`/connect_t212`)"
+        gemini_status = "✅ Active (Gemini AI + Live News)" if has_gemini else "💡 Quantitative mode _(unlock AI via `/set_gemini_key`)_"
+        if user.monthly_income > 0 or user.monthly_invest_budget > 0:
+            buf_warn = (
+                f"⚠️ _(missing `€{user.emergency_buffer_target - user.emergency_buffer_current:,.2f}`)_"
+                if user.emergency_buffer_current < user.emergency_buffer_target
+                else "✅"
+            )
+            budget_info = (
+                f"💵 *Monthly Net Income:* `€{user.monthly_income:,.2f}`\n"
+                f"📈 *Monthly Invest/Buffer Budget:* `€{user.monthly_invest_budget:,.2f}` (Report: {ord_str})\n"
+                f"🛡️ *Liquidity Buffer:* `€{user.emergency_buffer_current:,.2f}` / target `€{user.emergency_buffer_target:,.2f}` {buf_warn}"
+            )
+        else:
+            budget_info = (
+                f"📅 *Monthly Report:* Automated on the *{ord_str} of each month* _(change with `/set_payday`)_\n"
+                "💡 *Your budget and loans start completely blank (100% private to you).* Tap `💳 Loans & Budget` or `ℹ️ Help`!"
+            )
+        welcome = (
+            f"Welcome, *{user.full_name}*! 👋\n\n"
+            "This is your intelligent value-investing assistant built on *Warren Buffett & Charlie Munger's system*.\n\n"
+            "🏆 *Unified Top 3 (Watchlist vs. Your Portfolio):* Compares *undervalued stocks in your Trading 212 portfolio* head-to-head against the *shared Watchlist* so you know whether to reinforce a current holding or open a new position!\n"
+            "🔒 *100% Private Finances:* Your Trading 212 API keys, budget, cash buffer, and loans are AES-128 encrypted and visible ONLY to you.\n"
+            "🤝 *Shared Watchlist:* Stocks in `🎯 Watchlist` are synced across the group!\n\n"
+            f"🔐 *Trading 212:* {has_t212}\n"
+            f"🤖 *Buffett AI Agent:* {gemini_status}\n"
+            f"🌐 *Language:* 🇬🇧 English _(switch to Български via `/lang`)_\n"
+            f"{budget_info}\n\n"
+            "Pick a menu button below, type any stock ticker (e.g. `INTU`), or ask a question directly in chat!"
         )
 
-    welcome = (
-        f"Здравей, *{user.full_name}*! 👋\n\n"
-        "Добре дошъл в интелигентния инвестиционен агент по системата на *Уорън Бъфет и Чарли Мънгър*!\n\n"
-        "🏆 *Обединен Топ 3 (Watchlist vs. Твоят портфейл):* Ботът сравнява на живо *подценените компании в твоя портфейл* срещу *общия Watchlist*, за да знаеш дали днес да подсилиш своя позиция или да добавиш нова!\n"
-        "🔒 *100% Лични финанси:* Твоят Trading 212 портфейл, бюджет, буфер, кредити и API ключове са криптирани и видими САМО за теб.\n"
-        "🤝 *Общ Watchlist:* Списъкът в `🎯 Watchlist` е общ за цялата ни група!\n\n"
-        f"🔐 *Твоят Trading 212:* {has_t212}\n"
-        f"🤖 *Бъфет AI Агент:* {gemini_status}\n"
-        f"{budget_info}\n\n"
-        "Избери бутон от менюто долу, напиши тикър (напр. `INTU`) или ми задай свободен въпрос направо в чата!"
-    )
-    await safe_reply(update.message, welcome, reply_markup=get_reply_keyboard(user))
+    await safe_reply(update.effective_message, welcome, reply_markup=get_reply_keyboard(user))
 
-    # For new friends who haven't finished setup yet, offer a clean 1-tap onboarding card
+    quick_rows = [
+        [
+            InlineKeyboardButton("🇧🇬 Превключи на Български", callback_data="lang_bg")
+            if not is_bg
+            else InlineKeyboardButton("🇬🇧 Switch to English", callback_data="lang_en"),
+            InlineKeyboardButton(
+                "🔔 Виж Топ 3 днес" if is_bg else "🔔 View Top 3 Today",
+                callback_data="act_check_alerts",
+            ),
+        ]
+    ]
     if not user.t212_api_key_enc or (user.monthly_income == 0 and user.monthly_invest_budget == 0):
-        quick_kb = InlineKeyboardMarkup(
+        quick_rows.append(
             [
-                [
-                    InlineKeyboardButton("🔑 Свържи Trading 212", callback_data="act_connect_t212"),
-                    InlineKeyboardButton("💳 Настрой Бюджет", callback_data="act_budget_help"),
-                ],
-                [
-                    InlineKeyboardButton("🤖 Сложи Gemini AI ключ", callback_data="act_gemini_help"),
-                    InlineKeyboardButton("🔔 Виж Топ 3 днес", callback_data="act_check_alerts"),
-                ],
+                InlineKeyboardButton(
+                    "🔑 Свържи Trading 212" if is_bg else "🔑 Connect Trading 212",
+                    callback_data="act_connect_t212",
+                ),
+                InlineKeyboardButton(
+                    "💳 Настрой Бюджет" if is_bg else "💳 Set Budget",
+                    callback_data="act_budget_help",
+                ),
             ]
         )
-        await safe_reply(
-            update.message,
-            "🚀 *Бърз старт за 60 секунди — избери стъпка:*",
-            reply_markup=quick_kb,
+        quick_rows.append(
+            [
+                InlineKeyboardButton(
+                    "🤖 Сложи Gemini AI ключ" if is_bg else "🤖 Add Free Gemini AI Key",
+                    callback_data="act_gemini_help",
+                )
+            ]
         )
+    await safe_reply(
+        update.effective_message,
+        "🚀 *Бързи действия / Quick Actions:*" if is_bg else "🚀 *Quick Actions & Language:*",
+        reply_markup=InlineKeyboardMarkup(quick_rows),
+    )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
-    day_suffix = format_bg_ordinal(user.payday_day)
-    text = (
-        "📘 *ПОМОЩ: КАК РАБОТИ БОТЪТ И КАК ДА ГО ИЗПОЛЗВАШ*\n\n"
-        "Този бот е твоят личен инвестиционен агент по системата на *Уорън Бъфет и Чарли Мънгър*. Всички препоръки се изчисляват *динамично на живо* според текущите цени и твоя портфейл.\n\n"
-        "🔒 *1. ТВОИТЕ ЛИЧНИ ДАННИ (Видими САМО за теб)*\n"
-        "  • *Свържи Trading 212 портфейл (100% безопасно, Read-Only):*\n"
-        "    От Trading 212 -> *Settings -> API (Beta) -> Generate API Key* (само отметки за четене!) и напиши:\n"
-        "    `/connect_t212 ТВОЯТ_KEY ТВОЯТ_SECRET`\n"
-        "    _(Ключът се криптира с AES-128 и съобщението ти се трие веднага от чата!)_\n"
-        "  • *Настрой своя бюджет и буфер:*\n"
-        "    `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ БУФЕР` _(напр._ `/set_budget 1200 150 500`_)_\n"
-        "    За бърза промяна само на буфера: `/set_buffer СУМА` _(напр._ `/set_buffer 200`_)_\n"
-        "  • *Промени деня за автоматичния месечен отчет:*\n"
-        "    `/set_payday ДЕН` _(за нови потребители по подразбиране е 1-во число; твоят текущ ден е_ "
-        f"*{day_suffix} число*_)_\n"
-        "  • *Ако имаш кредит (Инверсия на Мънгър):*\n"
-        "    По подразбиране нямаш въведени кредити. Ако имаш, въведи го с:\n"
-        "    `/set_loan БАНКА ГЛАВНИЦА ГПР% РЕДОВНА_ВНОСКА ПРЕДСРОЧНА_ВНОСКА`\n"
-        "    _(При главница `0` кредитът се изтрива)._\n\n"
-        "🏆 *2. ОБЕДИНЕН ТОП 3 (WATCHLIST vs. ТВОЯТ ПОРТФЕЙЛ) & АЛАРМИ*\n"
-        "  • Натисни *🔔 Топ 3 & Аларми* (`/check_alerts`) — ботът проверява на живо *и общия Watchlist, и акциите в твоя Trading 212 портфейл*, след което ги сравнява директно в *Общ Топ 3*, за да знаеш дали да подсилиш своя подценена акция (`💼`) или да добавиш нова (`🎯`).\n"
-        "  • *Веднъж на 1 седмица* (всеки понеделник) ботът праща автоматичен преглед за всички.\n"
-        "  • Сподели нова компания с групата в *🎯 Watchlist*: `/add_watch ТИКЪР` _(ботът сам изчислява IV и Target Buy и известява всички!)_\n"
-        "  • За 10-точков анализ напиши директно тикър (напр. `INTU`, `KO`, `META`) или `/buffett ТИКЪР`.\n\n"
-        "🤖 *3. GEMINI AI АГЕНТ (БЕЗПЛAТЕН КЛЮЧ НАПРАВО В TELEGRAM)*\n"
-        "  • Всеки потребител може да активира собствен безплатен AI агент с живи новини (не ти трябва достъп до сървъра!):\n"
-        "    1) Отвори `aistudio.google.com/apikey` и влез с Google.\n"
-        "    2) Натисни *Create API key* → в _Choose an imported project_ избери *Default Gemini Project* (или създай нов) и му дай име (напр. `Buffett Bot`).\n"
-        "    3) Копирай ключа и напиши тук: `/set_gemini_key ТВОЯТ_КЛЮЧ`\n"
-        "  • _(Съобщението с ключа се трие веднага и се пази криптирано само за теб! Ако собственикът на бота вече е добавил ключ, AI работи автоматично за всички.)_"
-    )
-    await safe_reply(update.message, text, reply_markup=get_reply_keyboard(user))
+    lang = get_lang(user)
+    ord_str = format_ordinal(user.payday_day, lang)
+
+    if lang == "bg":
+        text = (
+            "📘 *ПОМОЩ: КАК РАБОТИ БОТЪТ И КАК ДА ГО ИЗПОЛЗВАШ*\n\n"
+            "Този бот е твоят личен инвестиционен агент по системата на *Уорън Бъфет и Чарли Мънгър*. Всички препоръки се изчисляват *динамично на живо*.\n\n"
+            "🔒 *1. ТВОИТЕ ЛИЧНИ ДАННИ (Видими САМО за теб)*\n"
+            "  • *Свържи Trading 212 (Read-Only):* Settings -> API -> Generate API Key (само права за четене!) и напиши:\n"
+            "    `/connect_t212 API_KEY API_SECRET` _(съобщението се трие веднага и ключът се криптира с AES-128)_\n"
+            "  • *Бюджет и буфер:* `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ БУФЕР` _(напр._ `/set_budget 1200 150 500`_)_\n"
+            "  • *Само буфер:* `/set_buffer СУМА` | *Ден за месечен отчет:* `/set_payday ДЕН` _(текущо:_ "
+            f"*{ord_str} число*_)_\n"
+            "  • *Кредит (ако имаш):* `/set_loan БАНКА ГЛАВНИЦА ГПР% РЕДОВНА ПРЕДСРОЧНА` _(главница `0` го изтрива)_\n\n"
+            "🏆 *2. ОБЕДИНЕН ТОП 3 (WATCHLIST vs. ПОРТФЕЙЛ) & АЛАРМИ*\n"
+            "  • Натисни *🔔 Топ 3 & Аларми* (`/check_alerts`) — сравнява на живо *общия Watchlist* и *твоите позиции в Trading 212*, за да знаеш дали да подсилиш своя акция (`💼`) или да добавиш нова (`🎯`).\n"
+            "  • *Веднъж на 1 седмица* (всеки понеделник) ботът праща автоматичен преглед.\n"
+            "  • Сподели акция в *🎯 Watchlist*: `/add_watch ТИКЪР` | Бърз анализ: напиши тикър (напр. `INTU`, `KO`) или `/buffett ТИКЪР`.\n\n"
+            "🤖 *3. GEMINI AI АГЕНТ (БЕЗПЛАТЕН КЛЮЧ НАПРАВО В TELEGRAM)*\n"
+            "  1) Отвори `aistudio.google.com/apikey` -> *Create API key* -> избери *Default Gemini Project*.\n"
+            "  2) Напиши тук: `/set_gemini_key ТВОЯТ_КЛЮЧ` _(трие се веднага и се криптира!)_\n\n"
+            "🌐 *4. СМЯНА НА ЕЗИКА:* Напиши `/lang` или натисни `🌐 Език (EN/BG)` за 🇬🇧 English / 🇧🇬 Български."
+        )
+    else:
+        text = (
+            "📘 *HELP: HOW THE BUFFETT & MUNGER BOT WORKS*\n\n"
+            "This bot is your personal value-investing assistant built on *Warren Buffett & Charlie Munger's framework*. All valuations and picks are calculated *live*.\n\n"
+            "🔒 *1. YOUR PRIVATE FINANCES (Visible ONLY to you)*\n"
+            "  • *Connect Trading 212 (Read-Only):* Go to T212 Settings -> API -> Generate API Key (Read-Only permissions) and send:\n"
+            "    `/connect_t212 API_KEY API_SECRET` _(your message is deleted immediately and keys are AES-128 encrypted)_\n"
+            "  • *Budget & Cash Buffer:* `/set_budget INCOME INVEST_BUDGET BUFFER` _(e.g._ `/set_budget 1500 250 500`_)_\n"
+            "  • *Buffer only:* `/set_buffer AMOUNT` | *Monthly report day:* `/set_payday DAY` _(current:_ "
+            f"*{ord_str}*_)_\n"
+            "  • *High-interest Loan (optional):* `/set_loan BANK PRINCIPAL APR REGULAR EXTRA` _(set principal to `0` to clear)_\n\n"
+            "🏆 *2. UNIFIED TOP 3 (WATCHLIST vs. YOUR PORTFOLIO) & ALERTS*\n"
+            "  • Tap *🔔 Top 3 & Alerts* (`/check_alerts`) — scans BOTH the *shared Watchlist* and *your own Trading 212 holdings* live, ranking them head-to-head so you know whether to reinforce a current holding (`💼`) or add a new stock (`🎯`).\n"
+            "  • *Weekly automated scan* runs every Monday for all users.\n"
+            "  • Share a stock to *🎯 Watchlist*: `/add_watch TICKER` | Instant 10-point scorecard: type any ticker (e.g. `INTU`, `KO`) or `/buffett TICKER`.\n\n"
+            "🤖 *3. FREE GEMINI AI AGENT (NO `.env` NEEDED)*\n"
+            "  1) Open `aistudio.google.com/apikey` -> *Create API key* -> select *Default Gemini Project*.\n"
+            "  2) Send `/set_gemini_key YOUR_KEY` right here _(auto-deleted & encrypted!)_\n\n"
+            "🌐 *4. SWITCH LANGUAGE:* Use `/lang` or tap `🌐 Language (EN/BG)` to toggle between 🇬🇧 English and 🇧🇬 Български."
+        )
+    await safe_reply(update.effective_message, text, reply_markup=get_reply_keyboard(user))
 
 
 async def cmd_set_gemini_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Allow ANY user (owner or friend) to set their own encrypted free Gemini API key directly in Telegram."""
+    """Allow ANY user to set their own encrypted free Gemini API key directly in Telegram."""
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     args = context.args or []
 
     if len(args) < 1:
@@ -522,28 +750,39 @@ async def cmd_set_gemini_key(update: Update, context: ContextTypes.DEFAULT_TYPE)
             db_user = session.query(User).filter(User.id == user.id).first()
             has_own = bool(db_user.gemini_api_key_enc)
             has_any = bool(_get_gemini_api_key(user=db_user, session=session))
-        status = (
-            "✅ Имаш записан собствен криптиран Gemini ключ."
-            if has_own
-            else (
-                "✅ AI Агентът вече е активен (ползва споделения ключ на бота). Можеш да сложиш и свой личен ключ за отделна квота."
-                if has_any
-                else "⚠️ Все още нямаш добавен Gemini API ключ."
+
+        if is_bg:
+            status = (
+                "✅ Имаш записан собствен криптиран Gemini ключ."
+                if has_own
+                else ("✅ AI Агентът вече е активен (ползва споделения ключ)." if has_any else "⚠️ Все още нямаш добавен Gemini API ключ.")
             )
-        )
-        msg = (
-            "🤖 *НАСТРОЙКА НА GEMINI AI API КЛЮЧ (БЕЗПЛАТНО, БЕЗ `.env`)*\n\n"
-            f"*Текущ статус:* {status}\n\n"
-            "*Как да вземеш безплатен ключ за 30 секунди:*\n"
-            "1️⃣ Отвори `aistudio.google.com/apikey` и влез с Google акаунт.\n"
-            "2️⃣ Натисни *Create API key*:\n"
-            "   • *Name your key:* напр. `Buffett Bot`\n"
-            "   • *Choose an imported project:* избери **`Default Gemini Project`** _(или натисни `+ Create project`)_\n"
-            "3️⃣ Копирай ключа (започва с `AIza...`) и изпрати тук:\n"
-            "`/set_gemini_key ТВОЯТ_API_KEY`\n\n"
-            "🛡️ *Сигурност:* Веднага след изпращане ботът *изтрива съобщението ти от чата* и записва ключа криптиран с `AES-128 Fernet`.\n"
-            "_(За премахване на личния ключ напиши:_ `/set_gemini_key off`_)._"
-        )
+            msg = (
+                "🤖 *НАСТРОЙКА НА GEMINI AI API КЛЮЧ (БЕЗПЛАТНО, БЕЗ `.env`)*\n\n"
+                f"*Текущ статус:* {status}\n\n"
+                "*Как да вземеш безплатен ключ за 30 секунди:*\n"
+                "1️⃣ Отвори `aistudio.google.com/apikey` и влез с Google.\n"
+                "2️⃣ Натисни *Create API key* -> избери **`Default Gemini Project`** и дай име (напр. `Buffett Bot`).\n"
+                "3️⃣ Копирай ключа (`AIza...`) и изпрати тук:\n"
+                "`/set_gemini_key ТВОЯТ_API_KEY`\n\n"
+                "🛡️ _Съобщението се трие веднага от чата и ключът се пази криптиран с AES-128. За премахване:_ `/set_gemini_key off`."
+            )
+        else:
+            status = (
+                "✅ You have a personal encrypted Gemini key saved."
+                if has_own
+                else ("✅ AI Agent is active (using shared bot key). You may still add your own for a separate quota." if has_any else "⚠️ No Gemini API key configured yet.")
+            )
+            msg = (
+                "🤖 *SET FREE GEMINI AI API KEY (DIRECTLY IN TELEGRAM)*\n\n"
+                f"*Current status:* {status}\n\n"
+                "*Get a free key in 30 seconds:*\n"
+                "1️⃣ Open `aistudio.google.com/apikey` and sign in with Google.\n"
+                "2️⃣ Click *Create API key* -> select **`Default Gemini Project`** and name it (e.g. `Buffett Bot`).\n"
+                "3️⃣ Copy the key (`AIza...`) and send:\n"
+                "`/set_gemini_key YOUR_API_KEY`\n\n"
+                "🛡️ _Your message is immediately deleted from chat and encrypted with AES-128 Fernet. To remove:_ `/set_gemini_key off`."
+            )
         await safe_reply(update.effective_message, msg)
         return
 
@@ -558,12 +797,16 @@ async def cmd_set_gemini_key(update: Update, context: ContextTypes.DEFAULT_TYPE)
             db_user = session.query(User).filter(User.id == user.id).first()
             db_user.gemini_api_key_enc = None
             session.commit()
-        await update.effective_chat.send_message("🗑️ Личният ти Gemini API ключ беше премахнат.")
+        await update.effective_chat.send_message(
+            "🗑️ Личният ти Gemini API ключ беше премахнат." if is_bg else "🗑️ Your personal Gemini API key has been removed."
+        )
         return
 
     if len(raw_key) < 20:
         await update.effective_chat.send_message(
-            "❌ Ключът изглежда твърде кратък или невалиден. Копирай пълния ключ от Google AI Studio (започва с AIza...) и опитай пак с /set_gemini_key КЛЮЧ."
+            "❌ Ключът изглежда твърде кратък. Опитай пак с /set_gemini_key КЛЮЧ."
+            if is_bg
+            else "❌ That key looks too short. Copy the full key (starts with AIza...) and try /set_gemini_key YOUR_KEY."
         )
         return
 
@@ -574,33 +817,44 @@ async def cmd_set_gemini_key(update: Update, context: ContextTypes.DEFAULT_TYPE)
         owner = session.query(User).order_by(User.id.asc()).first()
         is_owner = owner is not None and owner.id == db_user.id
 
-    shared_note = (
-        "\n🤝 _Тъй като си собственикът на бота, този ключ автоматично активира AI Агента и за твоите приятели (докато не си сложат свой собствен)!_"
-        if is_owner
-        else "\n🔒 _Ключът е криптиран и се ползва единствено за твоя профил._"
-    )
-    await safe_send(
-        context.bot,
-        update.effective_chat.id,
-        "✅ *Gemini AI API ключът е запазен и криптиран успешно!*\n"
-        "_(Съобщението с ключа беше изтрито от чата за твоя сигурност.)_"
-        f"{shared_note}\n\n"
-        "Вече можеш да натиснеш *🤖 Бъфет Агент* или просто да ми напишеш свободен въпрос в чата!",
-    )
+    if is_bg:
+        shared_note = (
+            "\n🤝 _Като собственик на бота, този ключ активира AI Агента и за приятелите ти!_"
+            if is_owner
+            else "\n🔒 _Ключът е криптиран и се ползва единствено за твоя профил._"
+        )
+        msg = f"✅ *Gemini AI API ключът е запазен и криптиран!*\n_(Съобщението с ключа беше изтрито от чата.)_{shared_note}"
+    else:
+        shared_note = (
+            "\n🤝 _As the bot owner, this key also powers the AI Agent for your group!_"
+            if is_owner
+            else "\n🔒 _Encrypted and used exclusively for your profile._"
+        )
+        msg = f"✅ *Gemini AI API key saved & encrypted!*\n_(Your message containing the key was deleted from chat.)_{shared_note}"
+    await safe_send(context.bot, update.effective_chat.id, msg)
 
 
 async def cmd_connect_t212(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     args = context.args or []
 
     if len(args) < 1:
         msg = (
             "🔑 *СВЪРЗВАНЕ НА ТВОЯ TRADING 212 ПОРТФЕЙЛ (READ-ONLY)*\n\n"
-            "За да свържеш личния си портфейл, изпрати командата във формат:\n"
+            "Изпрати командата във формат:\n"
             "`/connect_t212 ТВОЯТ_API_KEY ТВОЯТ_API_SECRET`\n\n"
-            "🛡️ *100% Сигурност и поверителност:*\n"
+            "🛡️ *Сигурност:*\n"
             "1. Създай ключ само с права за четене (*Read-Only*) от Trading 212 -> Settings -> API.\n"
-            "2. Веднага след изпращане ботът *автоматично изтрива съобщението с ключа от чата* и го записва криптиран с `AES-128 Fernet` единствено в твоя личен профил."
+            "2. Веднага след изпращане ботът *изтрива съобщението ти* и го криптира с `AES-128 Fernet`."
+            if is_bg
+            else "🔑 *CONNECT YOUR TRADING 212 PORTFOLIO (READ-ONLY)*\n\n"
+            "Send your Read-Only API credentials:\n"
+            "`/connect_t212 YOUR_API_KEY YOUR_API_SECRET`\n\n"
+            "🛡️ *Security:*\n"
+            "1. Generate a *Read-Only* key in Trading 212 -> Settings -> API.\n"
+            "2. The bot *immediately deletes your message from chat* and encrypts the keys with `AES-128 Fernet`."
         )
         await safe_reply(update.effective_message, msg)
         return
@@ -617,7 +871,9 @@ async def cmd_connect_t212(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pass
 
     status_msg = await update.effective_chat.send_message(
-        "🔐 Ключовете са криптирани успешно! Тествам връзката с Trading 212 API (отнема ~8 секунди)..."
+        "🔐 Ключовете са криптирани! Тествам връзката с Trading 212 API (~8 сек.)..."
+        if is_bg
+        else "🔐 Keys encrypted! Testing live Trading 212 API connection (~8s)..."
     )
 
     with get_session() as session:
@@ -629,21 +885,26 @@ async def cmd_connect_t212(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         try:
             snap = await asyncio.to_thread(sync_user_portfolio, session, db_user)
-            report = format_portfolio_telegram(snap)
-            await safe_edit(
-                status_msg,
-                f"✅ *Твоят Trading 212 портфейл е свързан и синхронизиран успешно!*\n\n{report}",
+            report = format_portfolio_telegram(snap, lang=lang)
+            ok_hdr = (
+                "✅ *Твоят Trading 212 портфейл е свързан и синхронизиран успешно!*"
+                if is_bg
+                else "✅ *Your Trading 212 portfolio is connected and synced!*"
             )
+            await safe_edit(status_msg, f"{ok_hdr}\n\n{report}")
         except Exception as e:
-            await safe_edit(
-                status_msg,
-                f"⚠️ Ключовете са записани, но възникна грешка при извличане от Trading 212 API:\n`{e}`\n\n"
-                "Провери дали ключът е активен и има Read-Only права за Account, Portfolio и Pies.",
+            err_msg = (
+                f"⚠️ Ключовете са записани, но възникна грешка при Trading 212 API:\n`{e}`"
+                if is_bg
+                else f"⚠️ Keys were saved, but Trading 212 API returned an error:\n`{e}`"
             )
+            await safe_edit(status_msg, err_msg)
 
 
 async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     with get_session() as session:
         snap = (
             session.query(PortfolioSnapshot)
@@ -654,72 +915,97 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not snap:
             if not user.t212_api_key_enc:
                 await safe_reply(
-                    update.message,
-                    "⚠️ Все още нямаш свързан личен Trading 212 портфейл.\n"
-                    "Използвай `/connect_t212 API_KEY API_SECRET`, за да го свържеш!",
+                    update.effective_message,
+                    "⚠️ Все още нямаш свързан личен Trading 212 портфейл.\nИзползвай `/connect_t212 API_KEY API_SECRET`!"
+                    if is_bg
+                    else "⚠️ No Trading 212 portfolio connected yet.\nUse `/connect_t212 API_KEY API_SECRET` to connect!",
                 )
                 return
-            wait_msg = await update.message.reply_text("🔄 Извличам твоя портфейл на живо от Trading 212 API...")
+            wait_msg = await update.effective_message.reply_text(
+                "🔄 Извличам твоя портфейл на живо от Trading 212 API..."
+                if is_bg
+                else "🔄 Fetching your live portfolio from Trading 212 API..."
+            )
             try:
                 db_user = session.query(User).filter(User.id == user.id).first()
                 snap = await asyncio.to_thread(sync_user_portfolio, session, db_user)
             except Exception as e:
-                await safe_edit(wait_msg, f"❌ Грешка при връзка с Trading 212: `{e}`")
+                await safe_edit(wait_msg, f"❌ Trading 212 error: `{e}`")
                 return
             await wait_msg.delete()
 
-        report = format_portfolio_telegram(snap)
+        report = format_portfolio_telegram(snap, lang=lang)
         kb = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🔄 Обнови от Trading 212 на живо", callback_data="act_sync_t212"),
-                    InlineKeyboardButton("🏆 Топ 3 за покупка днес", callback_data="act_check_alerts"),
+                    InlineKeyboardButton(
+                        "🔄 Обнови от Trading 212" if is_bg else "🔄 Sync T212 Live",
+                        callback_data="act_sync_t212",
+                    ),
+                    InlineKeyboardButton(
+                        "🏆 Топ 3 за покупка днес" if is_bg else "🏆 Top 3 Buys Today",
+                        callback_data="act_check_alerts",
+                    ),
                 ],
                 [
-                    InlineKeyboardButton("📅 Месечен отчет", callback_data="act_monthly_check"),
-                    InlineKeyboardButton("🤖 Попитай Агента за портфейла", callback_data="agent_portfolio"),
+                    InlineKeyboardButton(
+                        "📅 Месечен отчет" if is_bg else "📅 Monthly Check",
+                        callback_data="act_monthly_check",
+                    ),
+                    InlineKeyboardButton(
+                        "🤖 Попитай Агента" if is_bg else "🤖 Ask Buffett Agent",
+                        callback_data="agent_portfolio",
+                    ),
                 ],
             ]
         )
-        await safe_reply(update.message, report, reply_markup=kb)
+        await safe_reply(update.effective_message, report, reply_markup=kb)
 
 
 async def cmd_monthly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     with get_session() as session:
         db_user = session.query(User).filter(User.id == user.id).first()
         report = generate_monthly_check_report(session, db_user)
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🏆 Избери от Топ 3 днес", callback_data="act_check_alerts"),
-                InlineKeyboardButton("🔄 Синхронизирай T212", callback_data="act_sync_t212"),
+                InlineKeyboardButton(
+                    "🏆 Избери от Топ 3 днес" if is_bg else "🏆 Pick from Top 3 Today",
+                    callback_data="act_check_alerts",
+                ),
+                InlineKeyboardButton(
+                    "🔄 Синхронизирай T212" if is_bg else "🔄 Sync T212",
+                    callback_data="act_sync_t212",
+                ),
             ],
             [
                 InlineKeyboardButton("🎯 Watchlist", callback_data="act_watchlist"),
-                InlineKeyboardButton("🤖 Попитай Бъфет Агента", callback_data="agent_top3"),
+                InlineKeyboardButton(
+                    "🤖 Попитай Агента" if is_bg else "🤖 Ask Buffett Agent",
+                    callback_data="agent_top3",
+                ),
             ],
         ]
     )
-    await safe_reply(update.message, report, reply_markup=kb)
+    await safe_reply(update.effective_message, report, reply_markup=kb)
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    get_or_register_user(update.effective_user)
+    user = get_or_register_user(update.effective_user)
     with get_session() as session:
-        text, kb = format_watchlist_telegram(session)
-    await safe_reply(update.message, text, reply_markup=kb)
+        text, kb = format_watchlist_telegram(session, lang=get_lang(user))
+    await safe_reply(update.effective_message, text, reply_markup=kb)
 
 
 def _run_watchlist_check_isolated() -> list[int]:
-    """Thread-safe wrapper: runs live Watchlist price refresh in its own SQLAlchemy session and returns triggered IDs."""
     with get_session() as s:
         items = check_watchlist_alerts(s, None, True)
         return [w.id for w in items]
 
 
 def _run_portfolio_eval_isolated(user_id: int) -> list[dict]:
-    """Thread-safe wrapper: evaluates a user's held T212 single stocks in its own SQLAlchemy session."""
     with get_session() as s:
         u = s.query(User).filter(User.id == user_id).first()
         if not u:
@@ -730,14 +1016,17 @@ def _run_portfolio_eval_isolated(user_id: int) -> list[dict]:
             .order_by(PortfolioSnapshot.created_at.desc())
             .first()
         )
-        return evaluate_user_portfolio_undervalued(s, u, snap)
+        return evaluate_user_portfolio_undervalued(s, u, snap, lang=get_lang(u))
 
 
 async def cmd_check_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     chat = update.effective_chat
     wait_msg = await chat.send_message(
-        "🔎 Проверявам живите цени и Вътрешната стойност на общия Watchlist И на компаниите в твоя портфейл (отнема ~5 сек.)..."
+        "🔎 Проверявам живите цени и Вътрешната стойност на общия Watchlist И на компаниите в твоя портфейл (~5 сек.)..."
+        if is_bg
+        else "🔎 Scanning live prices & Buffett Intrinsic Value for BOTH the shared Watchlist AND your portfolio (~5s)..."
     )
     triggered_ids, portfolio_evals = await asyncio.gather(
         asyncio.to_thread(_run_watchlist_check_isolated),
@@ -764,41 +1053,59 @@ async def cmd_check_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Interactive Buffett & Munger Agent menu or direct question answering."""
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     question = " ".join(context.args or []).strip()
 
     if not question:
         with get_session() as session:
             db_user = session.query(User).filter(User.id == user.id).first()
             has_gemini = bool(_get_gemini_api_key(user=db_user, session=session))
-        ai_badge = "✅ *Gemini AI активен* (живи новини + задълбочен анализ)" if has_gemini else "💡 *Количествен режим* _(за свободен AI чат с новини сложи безплатен ключ с `/set_gemini_key`)_"
-        rows = [
-            [InlineKeyboardButton("🏆 Сравни Топ 3 днес (Нова vs Портфейл)", callback_data="agent_top3")],
-            [InlineKeyboardButton("📊 Кои позиции от портфейла ми да подсиля?", callback_data="agent_portfolio")],
-            [InlineKeyboardButton("🛡️ Как да разпределя парите между буфер, кредит и акции?", callback_data="agent_budget")],
-            [InlineKeyboardButton("🧠 Анализ на конкретна акция (INTU / META / KO)", callback_data="act_buffett_menu")],
-        ]
-        if not has_gemini:
-            rows.append([InlineKeyboardButton("🔑 Как да активирам безплатен Gemini AI ключ?", callback_data="act_gemini_help")])
-        kb = InlineKeyboardMarkup(rows)
-        await safe_reply(
-            update.message,
-            "🤖 *БЪФЕТ & МЪНГЪР ИНВЕСТИЦИОНЕН АГЕНТ*\n\n"
-            f"{ai_badge}\n\n"
-            "Аз виждам актуалния ти Trading 212 портфейл, ликвидния ти буфер, кредитите и общия Watchlist на живо.\n\n"
-            "Избери готов въпрос долу *или просто ми напиши свободен въпрос направо в чата* "
-            "(напр. _„Да подсиля ли META или да купя нова позиция в INTU?“_):",
-            reply_markup=kb,
-        )
+
+        if is_bg:
+            ai_badge = "✅ *Gemini AI активен* (живи новини + задълбочен анализ)" if has_gemini else "💡 *Количествен режим* _(за свободен AI чат сложи безплатен ключ с `/set_gemini_key`)_"
+            rows = [
+                [InlineKeyboardButton("🏆 Сравни Топ 3 днес (Нова vs Портфейл)", callback_data="agent_top3")],
+                [InlineKeyboardButton("📊 Кои позиции от портфейла ми да подсиля?", callback_data="agent_portfolio")],
+                [InlineKeyboardButton("🛡️ Как да разпределя парите (буфер, кредит, акции)?", callback_data="agent_budget")],
+                [InlineKeyboardButton("🧠 Анализ на конкретна акция (INTU / META / KO)", callback_data="act_buffett_menu")],
+            ]
+            if not has_gemini:
+                rows.append([InlineKeyboardButton("🔑 Как да активирам безплатен Gemini AI ключ?", callback_data="act_gemini_help")])
+            msg = (
+                "🤖 *БЪФЕТ & МЪНГЪР ИНВЕСТИЦИОНЕН АГЕНТ*\n\n"
+                f"{ai_badge}\n\n"
+                "Избери готов въпрос долу *или ми напиши свободен въпрос направо в чата* "
+                "(напр. _„Да подсиля ли META или да купя INTU?“_):"
+            )
+        else:
+            ai_badge = "✅ *Gemini AI Active* (live Google Search news + deep analysis)" if has_gemini else "💡 *Quantitative Mode* _(unlock free-form AI chat via `/set_gemini_key`)_"
+            rows = [
+                [InlineKeyboardButton("🏆 Compare Top 3 Today (New vs Portfolio)", callback_data="agent_top3")],
+                [InlineKeyboardButton("📊 Which portfolio holdings should I reinforce?", callback_data="agent_portfolio")],
+                [InlineKeyboardButton("🛡️ How to allocate cash (buffer, debt, stocks)?", callback_data="agent_budget")],
+                [InlineKeyboardButton("🧠 Deep Stock Scorecard (INTU / META / KO)", callback_data="act_buffett_menu")],
+            ]
+            if not has_gemini:
+                rows.append([InlineKeyboardButton("🔑 How to add a free Gemini AI key?", callback_data="act_gemini_help")])
+            msg = (
+                "🤖 *BUFFETT & MUNGER INVESTMENT AGENT*\n\n"
+                f"{ai_badge}\n\n"
+                "Pick a prompt below *or type any investing question directly in chat* "
+                "(e.g. _\"Should I reinforce META or open a new position in INTU?\"_):"
+            )
+        await safe_reply(update.effective_message, msg, reply_markup=InlineKeyboardMarkup(rows))
         return
 
     await _run_agent_question(update.effective_chat, user, question)
 
 
 async def _run_agent_question(chat, user: User, question: str) -> None:
+    is_bg = get_lang(user) == "bg"
     wait_msg = await chat.send_message(
-        "🤖 Анализирам портфейла ти, буфера, кредитите и живите пазарни данни по системата на Бъфет и Мънгър..."
+        "🤖 Анализирам портфейла ти, буфера, кредитите и живите пазарни данни по Бъфет и Мънгър..."
+        if is_bg
+        else "🤖 Analyzing your portfolio, cash buffer, loans, and live valuations using Buffett & Munger rules..."
     )
     try:
         with get_session() as session:
@@ -813,20 +1120,29 @@ async def _run_agent_question(chat, user: User, question: str) -> None:
         kb = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🏆 Избери от Топ 3 днес", callback_data="act_check_alerts"),
-                    InlineKeyboardButton("📅 Месечен отчет", callback_data="act_monthly_check"),
+                    InlineKeyboardButton(
+                        "🏆 Избери от Топ 3 днес" if is_bg else "🏆 Pick from Top 3 Today",
+                        callback_data="act_check_alerts",
+                    ),
+                    InlineKeyboardButton(
+                        "📅 Месечен отчет" if is_bg else "📅 Monthly Check",
+                        callback_data="act_monthly_check",
+                    ),
                 ]
             ]
         )
         await safe_edit(wait_msg, answer, reply_markup=kb)
     except Exception as e:
-        await safe_edit(wait_msg, f"❌ Грешка при обработка на въпроса: `{e}`")
+        await safe_edit(wait_msg, f"❌ Error: `{e}`")
 
 
 async def _handle_pick_stock(chat, user: User, ticker: str) -> None:
-    """When a user taps 'Избери <TICKER>' from Top 3, build a personalized Buy Ticket."""
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     wait_msg = await chat.send_message(
-        f"🎯 Подготвям персонален план за покупка на *{ticker}* според твоя бюджет и портфейл...",
+        f"🎯 Подготвям персонален план за покупка на *{ticker}*..."
+        if is_bg
+        else f"🎯 Preparing a personalized Buffett buy ticket for *{ticker}*...",
         parse_mode=ParseMode.MARKDOWN,
     )
     try:
@@ -849,12 +1165,16 @@ async def _handle_pick_stock(chat, user: User, ticker: str) -> None:
                 watch_item.last_price = metrics["price"]
                 session.commit()
 
-            score = compute_quantitative_buffett_scorecard(metrics, watch_item)
+            score = compute_quantitative_buffett_scorecard(metrics, watch_item, lang=lang)
             cur_sym = "$" if metrics.get("currency") == "USD" else ("p " if metrics.get("currency") == "GBX" else "€")
             price = metrics.get("price") or (watch_item.last_price if watch_item else 0.0) or 0.0
             inv_budget = float(db_user.monthly_invest_budget or 0.0)
             buf_missing = max(0.0, db_user.emergency_buffer_target - db_user.emergency_buffer_current)
-            investable = round(max(0.0, inv_budget - min(buf_missing, max(50.0, inv_budget * 0.45))), 2) if (buf_missing > 0 and inv_budget > 0) else inv_budget
+            investable = (
+                round(max(0.0, inv_budget - min(buf_missing, max(50.0, inv_budget * 0.45))), 2)
+                if (buf_missing > 0 and inv_budget > 0)
+                else inv_budget
+            )
             suggested_eur = round(max(20.0, investable * 0.35), 2) if investable > 0 else 50.0
 
             is_chip = ticker.upper() in SEMICONDUCTOR_SHORT_TICKERS
@@ -862,15 +1182,26 @@ async def _handle_pick_stock(chat, user: User, ticker: str) -> None:
 
             warnings = []
             if is_chip and semi_pct >= 20.0:
-                warnings.append(f"⚠️ *Секторно предупреждение:* Полупроводниците ти са `{semi_pct:.1f}%` (>20% таван). Помисли дали да не избереш не-чипова компания!")
+                warnings.append(
+                    f"⚠️ *Секторно предупреждение:* Полупроводниците ти са `{semi_pct:.1f}%` (>20% таван)."
+                    if is_bg
+                    else f"⚠️ *Sector Cap Warning:* Your semiconductor exposure is `{semi_pct:.1f}%` (>20% cap)."
+                )
             if buf_missing > 0:
-                warnings.append(f"🛡️ *Буфер:* Ликвидният ти буфер е `€{db_user.emergency_buffer_current:,.2f}` / `€{db_user.emergency_buffer_target:,.2f}` (липсват `€{buf_missing:,.2f}`).")
+                warnings.append(
+                    f"🛡️ *Буфер:* Ликвидният ти буфер е `€{db_user.emergency_buffer_current:,.2f}` / `€{db_user.emergency_buffer_target:,.2f}` (липсват `€{buf_missing:,.2f}`)."
+                    if is_bg
+                    else f"🛡️ *Liquidity Buffer:* `€{db_user.emergency_buffer_current:,.2f}` / `€{db_user.emergency_buffer_target:,.2f}` (missing `€{buf_missing:,.2f}`)."
+                )
 
             is_eu_etf = ticker.upper() in {"VWCE", "SEC0", "XDWU", "ESIF", "BGX", "IWDA", "SXR8", "CSPX"}
-            tax_note = "0% данък капиталова печалба в България (регулиран пазар в ЕС/ЕИП)" if is_eu_etf else "10% данък капиталова печалба в БГ (САЩ/извън ЕС) и 10% удържан данък дивидент в САЩ"
+            if is_bg:
+                tax_note = "0% данък капиталова печалба в България (регулиран пазар в ЕС/ЕИП)" if is_eu_etf else "10% данък капиталова печалба в БГ (САЩ/извън ЕС) и 10% дивидент в САЩ"
+                held_status_line = "🎯 *Статус в портфейла ти:* Нова компания (подходяща за добавяне към US пай или като нова позиция)."
+            else:
+                tax_note = "EU-regulated UCITS ETF (tax-efficient in most EU countries; 0% CGT in Bulgaria)" if is_eu_etf else "US/Non-EU single stock (standard local CGT & US dividend withholding apply)"
+                held_status_line = "🎯 *Portfolio Status:* New Watchlist company (not currently held — ready to open a new position)."
 
-            # Check whether the user ALREADY owns this stock in Trading 212
-            held_status_line = "🎯 *Статус в портфейла ти:* Нова компания (все още не я притежаваш — подходяща за добавяне към US пай или като нова позиция)."
             if latest_snap and latest_snap.raw_json:
                 try:
                     parsed = parse_t212_snapshot(json.loads(latest_snap.raw_json))
@@ -878,26 +1209,40 @@ async def _handle_pick_stock(chat, user: User, ticker: str) -> None:
                         for inst in pie.get("instruments") or []:
                             if inst["ticker"].upper() == ticker.upper():
                                 held_status_line = (
-                                    f"💼 *Статус в портфейла ти:* Вече я притежаваш в *{pie['name']}* — "
-                                    f"текуща стойност `€{inst['value']:,.2f}` (дял `{inst['current_pct']:.1f}%` / цел `{inst['expected_pct']:.0f}%`). "
-                                    "Можеш да я подсилиш на отстъпка!"
+                                    f"💼 *Статус в портфейла ти:* Вече я притежаваш в *{pie['name']}* — `€{inst['value']:,.2f}` (дял `{inst['current_pct']:.1f}%` / цел `{inst['expected_pct']:.0f}%`)."
+                                    if is_bg
+                                    else f"💼 *Portfolio Status:* Already held in *{pie['name']}* — `€{inst['value']:,.2f}` (weight `{inst['current_pct']:.1f}%` / target `{inst['expected_pct']:.0f}%`)."
                                 )
                                 break
                 except Exception:
                     pass
 
-            lines = [
-                f"🎯 *ИЗБРАНА ПОЗИЦИЯ ЗА ИНВЕСТИЦИЯ: `{ticker}` ({metrics.get('name', ticker)})*",
-                "",
-                held_status_line,
-                f"• *Жива цена:* `{cur_sym}{price:,.2f}`",
-                f"• *Вътрешна стойност (IV по Бъфет):* `{cur_sym}{score['iv_low']:,.2f} – {cur_sym}{score['iv_high']:,.2f}`",
-                f"• *Целева цена за покупка (Target Buy):* `<= {cur_sym}{score['target_buy']:,.2f}`",
-                f"• *Присъда:* *{score['verdict']}*",
-                f"• *Данък (България):* _{tax_note}_",
-                "",
-                f"💶 *Предложена сума за вход от месечния ти бюджет:* *`€{suggested_eur:,.2f}`* _(от наличните `€{investable:,.2f}` за акции след резервиране за буфер)_",
-            ]
+            if is_bg:
+                lines = [
+                    f"🎯 *ИЗБРАНА ПОЗИЦИЯ ЗА ИНВЕСТИЦИЯ: `{ticker}` ({metrics.get('name', ticker)})*",
+                    "",
+                    held_status_line,
+                    f"• *Жива цена:* `{cur_sym}{price:,.2f}`",
+                    f"• *Вътрешна стойност (IV):* `{cur_sym}{score['iv_low']:,.2f} – {cur_sym}{score['iv_high']:,.2f}`",
+                    f"• *Целева цена за покупка (Target Buy):* `<= {cur_sym}{score['target_buy']:,.2f}`",
+                    f"• *Присъда:* *{score['verdict']}*",
+                    f"• *Данък:* _{tax_note}_",
+                    "",
+                    f"💶 *Предложена сума за вход:* *`€{suggested_eur:,.2f}`* _(от наличните `€{investable:,.2f}` след резервиране за буфер)_",
+                ]
+            else:
+                lines = [
+                    f"🎯 *SELECTED BUY TICKET: `{ticker}` ({metrics.get('name', ticker)})*",
+                    "",
+                    held_status_line,
+                    f"• *Live Price:* `{cur_sym}{price:,.2f}`",
+                    f"• *Intrinsic Value Range:* `{cur_sym}{score['iv_low']:,.2f} – {cur_sym}{score['iv_high']:,.2f}`",
+                    f"• *Target Buy Price:* `<= {cur_sym}{score['target_buy']:,.2f}`",
+                    f"• *Verdict:* *{score['verdict']}*",
+                    f"• *Tax Note:* _{tax_note}_",
+                    "",
+                    f"💶 *Suggested Entry Allocation:* *`€{suggested_eur:,.2f}`* _(from `€{investable:,.2f}` investable after buffer reserve)_",
+                ]
             if warnings:
                 lines.append("")
                 lines.extend(warnings)
@@ -905,43 +1250,55 @@ async def _handle_pick_stock(chat, user: User, ticker: str) -> None:
             kb = InlineKeyboardMarkup(
                 [
                     [
-                        InlineKeyboardButton(f"✅ Потвърждавам избора: {ticker}", callback_data=f"confirm_{ticker}_{int(suggested_eur)}"),
-                        InlineKeyboardButton(f"🧠 Пълен Бъфет анализ", callback_data=f"buffett_{ticker}"),
+                        InlineKeyboardButton(
+                            f"✅ Потвърждавам: {ticker}" if is_bg else f"✅ Confirm Pick: {ticker}",
+                            callback_data=f"confirm_{ticker}_{int(suggested_eur)}",
+                        ),
+                        InlineKeyboardButton(
+                            "🧠 Пълен Бъфет анализ" if is_bg else "🧠 Full Buffett Scorecard",
+                            callback_data=f"buffett_{ticker}",
+                        ),
                     ],
                     [
-                        InlineKeyboardButton("⬅️ Обратно към Топ 3", callback_data="act_check_alerts"),
+                        InlineKeyboardButton(
+                            "⬅️ Обратно към Топ 3" if is_bg else "⬅️ Back to Top 3",
+                            callback_data="act_check_alerts",
+                        )
                     ],
                 ]
             )
         await safe_edit(wait_msg, "\n".join(lines), reply_markup=kb)
     except Exception as e:
-        await safe_edit(wait_msg, f"❌ Грешка при избор на *{ticker}*: `{e}`")
+        await safe_edit(wait_msg, f"❌ Error loading *{ticker}*: `{e}`")
 
 
 async def cmd_add_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     args = context.args or []
     if len(args) < 1:
         await safe_reply(
             update.effective_message,
             "🤝 *ДОБАВЯНЕ НА АКЦИЯ В ОБЩИЯ WATCHLIST (ЗА ВСИЧКИ)*\n\n"
-            "Можеш да добавиш акция по два начина:\n"
-            "1️⃣ *Автоматична Бъфет оценка (само с тикър):*\n"
-            "`/add_watch ТИКЪР` _(напр._ `/add_watch AAPL` _— ботът сам изчислява Вътрешната стойност и Target Buy цената!)_\n\n"
-            "2️⃣ *С твоя целева цена за покупка:*\n"
-            "`/add_watch ТИКЪР TARGET_BUY [IV_LOW] [IV_HIGH]`\n"
-            "_(Пример:_ `/add_watch MSFT 380 450 520`_)_\n\n"
-            "🔔 _Веднага щом я добавиш, всички приятели в бота ще я видят в общия Watchlist и ще получат известие!_",
+            "1️⃣ `/add_watch ТИКЪР` _(ботът сам изчислява IV и Target Buy!)_\n"
+            "2️⃣ `/add_watch ТИКЪР TARGET_BUY [IV_LOW] [IV_HIGH]`"
+            if is_bg
+            else "🤝 *ADD A STOCK TO THE SHARED WATCHLIST (FOR ALL USERS)*\n\n"
+            "1️⃣ `/add_watch TICKER` _(auto-computes Buffett IV & Target Buy!)_\n"
+            "2️⃣ `/add_watch TICKER TARGET_BUY [IV_LOW] [IV_HIGH]`",
         )
         return
 
     ticker = args[0].strip().upper()
     wait_msg = await update.effective_message.reply_text(
-        f"🔎 Извличам финансови данни и Бъфет оценка за *{ticker}*...",
+        f"🔎 Извличам финансови данни и Бъфет оценка за *{ticker}*..."
+        if is_bg
+        else f"🔎 Fetching fundamentals & Buffett valuation for *{ticker}*...",
         parse_mode=ParseMode.MARKDOWN,
     )
     metrics = await asyncio.to_thread(fetch_stock_fundamentals, ticker)
-    score = compute_quantitative_buffett_scorecard(metrics, None)
+    score = compute_quantitative_buffett_scorecard(metrics, None, lang=lang)
 
     if len(args) >= 2:
         try:
@@ -949,56 +1306,67 @@ async def cmd_add_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             iv_low = float(args[2].replace(",", ".")) if len(args) >= 3 else round(target_buy * 1.25, 2)
             iv_high = float(args[3].replace(",", ".")) if len(args) >= 4 else round(target_buy * 1.45, 2)
         except ValueError:
-            await safe_edit(wait_msg, "❌ Цените трябва да са валидни числа (напр. `/add_watch MSFT 380 450 520`).")
+            await safe_edit(
+                wait_msg,
+                "❌ Цените трябва да са валидни числа (напр. `/add_watch MSFT 380 450 520`)."
+                if is_bg
+                else "❌ Prices must be valid numbers (e.g. `/add_watch MSFT 380 450 520`).",
+            )
             return
     else:
         target_buy = score["target_buy"]
         iv_low = score["iv_low"]
         iv_high = score["iv_high"]
 
-    author_name = user.full_name or user.username or f"User #{user.id}"
+    author_name = user.full_name or (f"@{user.username}" if user.username else "Investor")
+    company_name = metrics.get("name") or ticker
+    currency = metrics.get("currency") or "USD"
     cur_price = metrics.get("price")
-    comp_name = metrics.get("name", ticker)
-    currency = metrics.get("currency", "USD")
+    roic = metrics.get("roic_est_pct")
     sym = "$" if currency == "USD" else ("p " if currency == "GBX" else "€")
 
     with get_session() as session:
         master_id = get_master_watchlist_owner_id(session)
-        item = (
+        existing = (
             session.query(WatchlistItem)
             .filter(WatchlistItem.user_id == master_id, WatchlistItem.ticker == ticker)
             .first()
         )
-        is_new = item is None
-        if is_new:
+        is_new = existing is None
+        if existing:
+            existing.target_buy_price = target_buy
+            existing.intrinsic_value_low = iv_low
+            existing.intrinsic_value_high = iv_high
+            existing.last_price = cur_price or existing.last_price
+            existing.company_name = company_name
+            existing.currency = currency
+            if roic is not None:
+                existing.roic_pct = roic
+            existing.notes = f"👤 {author_name} | {score['verdict']}"
+        else:
             max_rank = (
-                session.query(WatchlistItem)
+                session.query(WatchlistItem.rank_order)
                 .filter(WatchlistItem.user_id == master_id)
-                .count()
+                .order_by(WatchlistItem.rank_order.desc())
+                .first()
             )
+            next_rank = (max_rank[0] + 1) if max_rank else 1
             item = WatchlistItem(
                 user_id=master_id,
-                rank_order=max_rank + 1,
+                rank_order=next_rank,
                 ticker=ticker,
-                company_name=comp_name,
+                company_name=company_name,
                 currency=currency,
-                moat_summary=f"ROIC: {metrics.get('roic_est_pct') or 'N/A'}% | Опер. марж: {metrics.get('operating_margin_pct') or 'N/A'}%",
-                roic_pct=metrics.get("roic_est_pct"),
+                moat_summary=localize_moat(ticker, None, "en"),
+                roic_pct=roic,
                 intrinsic_value_low=iv_low,
                 intrinsic_value_high=iv_high,
                 target_buy_price=target_buy,
+                margin_of_safety_pct=score["mos_req"],
                 last_price=cur_price,
-                alert_enabled=True,
-                notes=f"👤 Добавена от {author_name}",
+                notes=f"👤 {author_name} | {score['verdict']}",
             )
             session.add(item)
-        else:
-            item.target_buy_price = target_buy
-            item.intrinsic_value_low = iv_low
-            item.intrinsic_value_high = iv_high
-            if cur_price:
-                item.last_price = cur_price
-            item.notes = f"👤 Обновена от {author_name}"
         session.commit()
 
         other_users = (
@@ -1006,48 +1374,54 @@ async def cmd_add_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             .filter(User.telegram_id != 0, User.telegram_id != user.telegram_id)
             .all()
         )
-        other_chat_ids = [u.telegram_id for u in other_users]
 
-    in_buy_zone = cur_price is not None and cur_price <= target_buy
-    zone_status = "🟢 *В ЗОНАТА ЗА ПОКУПКА ДНЕС!*" if in_buy_zone else "⏳ _Чакаме корекция до Target Buy_"
-    action_word = "добави нова компания" if is_new else "обнови компания"
-
-    price_line = f"• *Текуща цена:* `{sym}{cur_price:,.2f}`\n" if cur_price else ""
-    await safe_edit(
-        wait_msg,
-        f"✅ *{ticker}* ({comp_name}) е записана в *общия Watchlist* за всички!\n\n"
-        f"{price_line}"
-        f"• *Целева цена (Target Buy):* `<= {sym}{target_buy:,.2f}`\n"
-        f"• *Вътрешна стойност (IV):* `{sym}{iv_low:,.2f} – {sym}{iv_high:,.2f}`\n"
-        f"• *Статус:* {zone_status}",
-    )
-
-    if other_chat_ids:
-        price_fmt = f"{sym}{cur_price:,.2f}" if cur_price else "N/A"
-        broadcast_text = (
-            f"🤝 *НОВА НАХОДКА В ОБЩИЯ WATCHLIST!*\n\n"
-            f"👤 *{author_name}* {action_word}: *{ticker} ({comp_name})*\n"
-            f"• Текуща цена: `{price_fmt}`\n"
-            f"• Целева цена за покупка (Target Buy): `<= {sym}{target_buy:,.2f}`\n"
-            f"• Вътрешна стойност по Бъфет: `{sym}{iv_low:,.2f} – {sym}{iv_high:,.2f}`\n"
-            f"• Статус: {zone_status}\n\n"
-            f"Напиши `/buffett {ticker}` за пълен фундаментален анализ или `/watchlist` за целия списък!"
+    if is_bg:
+        action_verb = "добавена в" if is_new else "обновена в"
+        in_zone = "🟢 *В ЗОНАТА ЗА ПОКУПКА СЕГА!*" if (cur_price and cur_price <= target_buy) else "⏳ Чакаме Target Buy"
+        price_line = f"• *Текуща цена:* `{sym}{cur_price:,.2f}`\n" if cur_price else ""
+        confirm_text = (
+            f"✅ *{ticker} ({company_name})* беше {action_verb} *ОБЩИЯ WATCHLIST*!\n\n"
+            f"{price_line}"
+            f"• *Target Buy:* `<= {sym}{target_buy:,.2f}`\n"
+            f"• *Вътрешна стойност:* `{sym}{iv_low:,.0f} – {sym}{iv_high:,.0f}`\n"
+            f"• *Статус:* {in_zone}"
         )
-        for cid in other_chat_ids:
-            try:
-                await context.bot.send_message(chat_id=cid, text=broadcast_text, parse_mode=ParseMode.MARKDOWN)
-            except Exception as e:
-                logger.warning("Could not broadcast watchlist update to %s: %s", cid, e)
+    else:
+        action_verb = "added to" if is_new else "updated in"
+        in_zone = "🟢 *IN BUY ZONE RIGHT NOW!*" if (cur_price and cur_price <= target_buy) else "⏳ Waiting for Target Buy"
+        price_line = f"• *Current Price:* `{sym}{cur_price:,.2f}`\n" if cur_price else ""
+        confirm_text = (
+            f"✅ *{ticker} ({company_name})* was {action_verb} the *SHARED WATCHLIST*!\n\n"
+            f"{price_line}"
+            f"• *Target Buy:* `<= {sym}{target_buy:,.2f}`\n"
+            f"• *Intrinsic Value:* `{sym}{iv_low:,.0f} – {sym}{iv_high:,.0f}`\n"
+            f"• *Status:* {in_zone}"
+        )
+    await safe_edit(wait_msg, confirm_text)
+
+    for ou in other_users:
+        o_bg = get_lang(ou) == "bg"
+        bcast = (
+            f"🤝 *ОБЩ WATCHLIST:* *{author_name}* добави `{ticker}` ({company_name}) | Target Buy: `<= {sym}{target_buy:,.2f}`"
+            if o_bg
+            else f"🤝 *SHARED WATCHLIST:* *{author_name}* shared `{ticker}` ({company_name}) | Target Buy: `<= {sym}{target_buy:,.2f}`"
+        )
+        try:
+            await safe_send(context.bot, ou.telegram_id, bcast)
+        except Exception:
+            pass
 
 
 async def cmd_del_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     if not context.args:
-        await safe_reply(update.message, "Използвай: `/del_watch ТИКЪР` (напр. `/del_watch CRWD`)")
+        await safe_reply(
+            update.effective_message,
+            "Използвай: `/del_watch ТИКЪР`" if is_bg else "Usage: `/del_watch TICKER`",
+        )
         return
     ticker = context.args[0].strip().upper()
-    author_name = user.full_name or user.username or f"User #{user.id}"
-
     with get_session() as session:
         master_id = get_master_watchlist_owner_id(session)
         deleted = (
@@ -1056,48 +1430,45 @@ async def cmd_del_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             .delete()
         )
         session.commit()
-        other_chat_ids = [
-            u.telegram_id
-            for u in session.query(User).filter(User.telegram_id != 0, User.telegram_id != user.telegram_id).all()
-        ]
-
     if deleted:
-        await safe_reply(update.message, f"🗑️ Акцията *{ticker}* беше премахната от общия Watchlist.")
-        for cid in other_chat_ids:
-            try:
-                await context.bot.send_message(
-                    chat_id=cid,
-                    text=f"ℹ️ *{author_name}* премахна *{ticker}* от общия Watchlist.",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            except Exception:
-                pass
+        await safe_reply(
+            update.effective_message,
+            f"🗑️ *{ticker}* беше премахната от общия Watchlist."
+            if is_bg
+            else f"🗑️ *{ticker}* was removed from the shared Watchlist.",
+        )
     else:
-        await safe_reply(update.message, f"ℹ️ *{ticker}* не е намерена в общия Watchlist.")
+        await safe_reply(
+            update.effective_message,
+            f"ℹ️ *{ticker}* не е намерена в общия Watchlist."
+            if is_bg
+            else f"ℹ️ *{ticker}* was not found in the shared Watchlist.",
+        )
 
 
 async def cmd_buffett(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     if not context.args:
         kb = InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton("INTU (#1 Buy)", callback_data="buffett_INTU"),
-                    InlineKeyboardButton("NVDA (Карантина)", callback_data="buffett_NVDA"),
+                    InlineKeyboardButton("META", callback_data="buffett_META"),
                     InlineKeyboardButton("KO (Coca-Cola)", callback_data="buffett_KO"),
                 ],
                 [
                     InlineKeyboardButton("ASML", callback_data="buffett_ASML"),
-                    InlineKeyboardButton("META", callback_data="buffett_META"),
                     InlineKeyboardButton("GOOGL", callback_data="buffett_GOOGL"),
+                    InlineKeyboardButton("JPM", callback_data="buffett_JPM"),
                 ],
             ]
         )
         await safe_reply(
             update.effective_message,
-            "🧠 *БЪФЕТ & МЪНГЪР АНАЛИЗАТОР НА АКЦИИ*\n\n"
-            "Напиши `/buffett ТИКЪР` (или просто напиши тикъра в чата, напр. `INTU`, `MSFT`, `KO`) "
-            "или избери компания от бутоните:",
+            "🧠 *БЪФЕТ & МЪНГЪР АНАЛИЗАТОР НА АКЦИИ*\n\nНапиши `/buffett ТИКЪР` (или просто тикъра, напр. `INTU`) или избери компания:"
+            if is_bg
+            else "🧠 *BUFFETT & MUNGER STOCK ANALYZER*\n\nSend `/buffett TICKER` (or just type a ticker like `INTU`, `META`, `KO`) or pick below:",
             reply_markup=kb,
         )
         return
@@ -1107,8 +1478,11 @@ async def cmd_buffett(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
+    is_bg = get_lang(user) == "bg"
     wait_msg = await chat.send_message(
-        f"🧠 Извличам финансови отчети и изчислявам Owner Earnings и Вътрешна стойност по Бъфет за *{ticker}*...",
+        f"🧠 Извличам финансови отчети и изчислявам Owner Earnings и Вътрешна стойност по Бъфет за *{ticker}*..."
+        if is_bg
+        else f"🧠 Fetching financials and calculating Buffett Owner Earnings & Intrinsic Value for *{ticker}*...",
         parse_mode=ParseMode.MARKDOWN,
     )
     try:
@@ -1143,11 +1517,11 @@ async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
             [
                 [
                     InlineKeyboardButton(
-                        f"🎯 Избери {ticker} за инвестиция",
+                        f"🎯 Избери {ticker} за покупка" if is_bg else f"🎯 Buy Ticket: {ticker}",
                         callback_data=f"pick_{ticker}",
                     ),
                     InlineKeyboardButton(
-                        f"➕ Добави в Watchlist",
+                        "➕ Добави в Watchlist" if is_bg else "➕ Add to Watchlist",
                         callback_data=f"quickwatch_{ticker}",
                     ),
                 ]
@@ -1155,40 +1529,49 @@ async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
         )
         await safe_edit(wait_msg, report, reply_markup=kb)
     except Exception as e:
-        await safe_edit(wait_msg, f"❌ Грешка при анализ на *{ticker}*: `{e}`")
+        await safe_edit(wait_msg, f"❌ Analysis error for *{ticker}*: `{e}`")
 
 
 async def cmd_set_loan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     args = context.args or []
     if len(args) < 4:
         with get_session() as session:
             loans = session.query(UserLoan).filter(UserLoan.user_id == user.id, UserLoan.is_active.is_(True)).all()
             loan_lines = []
             for l in loans:
-                note_line = f"\n  └ 📋 _План: {l.notes}_" if l.notes else ""
-                loan_lines.append(
-                    f"• *{l.lender_name}* {f'(Договор № {l.contract_number})' if l.contract_number else ''}: "
-                    f"Главница `€{l.principal_balance:.2f}`, ГПР `{l.apr_percent:.2f}%`, "
-                    f"Редовна `€{l.regular_payment:.2f}` + Предсрочна `€{l.early_principal_payment:.2f}` (такса `0.5%` = `€{l.early_principal_payment*0.005:.2f}` → общо `€{l.regular_payment + l.early_principal_payment*1.005:.2f}/мес.`)"
-                    f"{note_line}"
-                )
+                note_line = f"\n  └ 📋 _{l.notes}_" if l.notes else ""
+                if is_bg:
+                    loan_lines.append(
+                        f"• *{l.lender_name}*: Главница `€{l.principal_balance:.2f}`, ГПР `{l.apr_percent:.2f}%`, "
+                        f"Редовна `€{l.regular_payment:.2f}` + Предсрочна `€{l.early_principal_payment:.2f}`"
+                        f"{note_line}"
+                    )
+                else:
+                    loan_lines.append(
+                        f"• *{l.lender_name}*: Principal `€{l.principal_balance:.2f}`, APR `{l.apr_percent:.2f}%`, "
+                        f"Regular `€{l.regular_payment:.2f}` + Extra `€{l.early_principal_payment:.2f}`"
+                        f"{note_line}"
+                    )
         if loan_lines:
             current_str = "\n".join(loan_lines)
         else:
             current_str = (
-                "✅ _В твоя профил няма въведени кредити._\n"
-                "_(Ако нямаш кредит, не е нужно да въвеждаш нищо — целият ти свободен капитал отива за буфер и инвестиции!)_"
+                "✅ _В твоя профил няма въведени кредити._"
+                if is_bg
+                else "✅ _No active loans recorded in your private profile._"
             )
-        await safe_reply(
-            update.message,
+        msg = (
             f"💳 *ТВОИТЕ КРЕДИТИ (Инверсия на Мънгър):*\n{current_str}\n\n"
-            "💡 Ако имаш кредит и искаш ботът да следи погасяването му в твоя личен профил, използвай:\n"
-            "`/set_loan БАНКА ГЛАВНИЦА ГПР% РЕДОВНА_ВНОСКА [ПРЕДСРОЧНА_ГЛАВНИЦА]`\n"
-            "Пример за въвеждане:\n"
-            "`/set_loan МоятаБанка 1000 15.5 100 50`\n"
-            "_(За да изтриеш/маркираш кредит като изплатен, въведи главница `0`)_",
+            "За добавяне/обновяване: `/set_loan БАНКА ГЛАВНИЦА ГПР% РЕДОВНА [ПРЕДСРОЧНА]`\n"
+            "Пример: `/set_loan МоятаБанка 1000 15.5 100 50` _(при главница `0` се изтрива)_"
+            if is_bg
+            else f"💳 *YOUR LOANS (Munger's Inversion):*\n{current_str}\n\n"
+            "To add or update a loan: `/set_loan BANK PRINCIPAL APR% REGULAR [EXTRA_PREPAYMENT]`\n"
+            "Example: `/set_loan MyBank 1000 15.5 100 50` _(set principal to `0` to mark paid off)_"
         )
+        await safe_reply(update.effective_message, msg)
         return
 
     lender = args[0].strip()
@@ -1198,15 +1581,14 @@ async def cmd_set_loan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reg_pmt = float(args[3].replace(",", "."))
         early_pmt = float(args[4].replace(",", ".")) if len(args) >= 5 else 0.0
     except ValueError:
-        await update.message.reply_text("❌ Моля, въведи валидни числа за главница, ГПР и вноски.")
+        await safe_reply(
+            update.effective_message,
+            "❌ Моля, въведи валидни числа." if is_bg else "❌ Please enter valid numbers for principal, APR, and payments.",
+        )
         return
 
     with get_session() as session:
-        loan = (
-            session.query(UserLoan)
-            .filter(UserLoan.user_id == user.id, UserLoan.lender_name == lender)
-            .first()
-        )
+        loan = session.query(UserLoan).filter(UserLoan.user_id == user.id, UserLoan.lender_name == lender).first()
         if not loan:
             loan = UserLoan(user_id=user.id, lender_name=lender)
             session.add(loan)
@@ -1219,17 +1601,26 @@ async def cmd_set_loan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if principal > 0:
         await safe_reply(
-            update.message,
-            f"✅ Кредитът към *{lender}* е записан в твоя личен профил!\n"
-            f"Главница: `€{principal:.2f}` | ГПР: `{apr:.2f}%` | Редовна: `€{reg_pmt:.2f}` | Предсрочна: `€{early_pmt:.2f}`",
+            update.effective_message,
+            f"✅ Кредитът към *{lender}* е записан (`€{principal:.2f}` @ `{apr:.2f}%` ГПР)!"
+            if is_bg
+            else f"✅ Loan with *{lender}* saved (`€{principal:.2f}` @ `{apr:.2f}%` APR)!",
         )
     else:
-        await safe_reply(update.message, f"🎉 Поздравления! Кредитът към *{lender}* е маркиран като напълно изплатен (`€0.00`)!")
+        await safe_reply(
+            update.effective_message,
+            f"🎉 Кредитът към *{lender}* е маркиран като изплатен (`€0.00`)!"
+            if is_bg
+            else f"🎉 Congrats! Loan with *{lender}* marked as paid off (`€0.00`)!",
+        )
 
 
 async def cmd_set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_or_register_user(update.effective_user)
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     args = context.args or []
+
     if len(args) < 2:
         with get_session() as session:
             db_user = session.query(User).filter(User.id == user.id).first()
@@ -1241,31 +1632,41 @@ async def cmd_set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             dynamic_lines = build_dynamic_investment_plan_lines(session, db_user, latest_snap)
 
+        ord_str = format_ordinal(db_user.payday_day, lang)
         if db_user.monthly_income > 0 or db_user.monthly_invest_budget > 0:
             buf_icon = "✅" if db_user.emergency_buffer_current >= db_user.emergency_buffer_target else "⚠️"
             dynamic_block = "\n".join(f"• {l}" for l in dynamic_lines)
-            status_lines = (
-                f"• Нетен месечен доход: `€{db_user.monthly_income:.2f}` (Месечен отчет: {format_bg_ordinal(db_user.payday_day)} число)\n"
-                f"• Месечна сума за буфер/инвестиции: `€{db_user.monthly_invest_budget:.2f}`\n"
-                f"• Ликвиден буфер (Revolut/Кеш): `€{db_user.emergency_buffer_current:.2f}` / цел `€{db_user.emergency_buffer_target:.2f}` {buf_icon}\n\n"
-                f"📈 *ДИНАМИЧЕН ПЛАН ЗА ИНВЕСТИРАНЕ ДНЕС (изчислен на живо):*\n{dynamic_block}"
-            )
+            if is_bg:
+                status_lines = (
+                    f"• Нетен месечен доход: `€{db_user.monthly_income:.2f}` (Отчет: {ord_str} число)\n"
+                    f"• Месечна сума за буфер/инвестиции: `€{db_user.monthly_invest_budget:.2f}`\n"
+                    f"• Ликвиден буфер: `€{db_user.emergency_buffer_current:.2f}` / цел `€{db_user.emergency_buffer_target:.2f}` {buf_icon}\n\n"
+                    f"📈 *ДИНАМИЧЕН ПЛАН ЗА ИНВЕСТИРАНЕ ДНЕС:*\n{dynamic_block}"
+                )
+            else:
+                status_lines = (
+                    f"• Monthly Net Income: `€{db_user.monthly_income:.2f}` (Report: {ord_str})\n"
+                    f"• Monthly Invest/Buffer Budget: `€{db_user.monthly_invest_budget:.2f}`\n"
+                    f"• Liquidity Buffer: `€{db_user.emergency_buffer_current:.2f}` / target `€{db_user.emergency_buffer_target:.2f}` {buf_icon}\n\n"
+                    f"📈 *LIVE DYNAMIC INVESTMENT PLAN TODAY:*\n{dynamic_block}"
+                )
         else:
             status_lines = (
-                "_Все още не си въвел своя месечен доход и бюджет за инвестиции._\n"
-                f"• Автоматичен месечен отчет: *{format_bg_ordinal(db_user.payday_day)} число на месеца*\n"
-                "_(Въведи данните си по-долу, за да се запазят в твоя личен профил!)_"
+                f"_Все още не си въвел своя месечен бюджет. Автоматичен отчет: *{ord_str} число*._"
+                if is_bg
+                else f"_Your monthly budget is blank. Automated monthly report: *{ord_str} of the month*._"
             )
-        await safe_reply(
-            update.message,
-            f"💰 *ТВОЯТ ЛИЧЕН МЕСЕЧЕН БЮДЖЕТ:*\n"
-            f"{status_lines}\n\n"
-            "За промяна на бюджета използвай:\n"
-            "`/set_budget ЧИСТ_ДОХОД ИНВЕСТ_БЮДЖЕТ [ТЕКУЩ_БУФЕР] [ДЕН_НА_ОТЧЕТА]`\n"
-            "Пример: `/set_budget 1200 150 500`\n"
-            "🛡️ Само за буфера: `/set_buffer СУМА` _(напр._ `/set_buffer 100`_)_\n"
-            "📅 Само за деня на отчета: `/set_payday ДЕН` _(напр._ `/set_payday 5`_)_",
+
+        msg = (
+            f"💰 *ТВОЯТ ЛИЧЕН МЕСЕЧЕН БЮДЖЕТ:*\n{status_lines}\n\n"
+            "Промяна: `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ [БУФЕР] [ДЕН]`\n"
+            "🛡️ Само буфер: `/set_buffer СУМА` | 📅 Ден на отчета: `/set_payday ДЕН`"
+            if is_bg
+            else f"💰 *YOUR PRIVATE MONTHLY BUDGET:*\n{status_lines}\n\n"
+            "Update: `/set_budget INCOME INVEST_BUDGET [BUFFER] [REPORT_DAY]`\n"
+            "🛡️ Buffer only: `/set_buffer AMOUNT` | 📅 Report day: `/set_payday DAY`"
         )
+        await safe_reply(update.effective_message, msg)
         return
 
     try:
@@ -1274,10 +1675,14 @@ async def cmd_set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         buf = float(args[2].replace(",", ".")) if len(args) >= 3 else user.emergency_buffer_current
         new_payday = int(args[3]) if len(args) >= 4 else None
         if new_payday is not None and not (1 <= new_payday <= 31):
-            await update.message.reply_text("❌ Денят за месечен отчет трябва да е число от 1 до 31.")
-            return
+            raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Моля, въведи валидни числа (напр. `/set_budget 1200 150 500`).")
+        await safe_reply(
+            update.effective_message,
+            "❌ Моля, въведи валидни числа (напр. `/set_budget 1200 150 500`)."
+            if is_bg
+            else "❌ Please provide valid numbers (e.g. `/set_budget 1500 250 500`).",
+        )
         return
 
     with get_session() as session:
@@ -1290,33 +1695,37 @@ async def cmd_set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         session.commit()
         session.refresh(db_user)
 
+    ord_str = format_ordinal(db_user.payday_day, lang)
     await safe_reply(
-        update.message,
-        f"✅ Личният ти бюджет е обновен!\n"
-        f"Чист доход: `€{income:.2f}` | За инвестиции/буфер: `€{inv_budget:.2f}/мес.` | Ликвиден буфер: `€{buf:.2f}` | Месечен отчет: `{format_bg_ordinal(db_user.payday_day)} число`",
+        update.effective_message,
+        (
+            f"✅ Бюджетът е обновен! Доход: `€{income:.2f}` | Инвестиции/буфер: `€{inv_budget:.2f}` | Буфер: `€{buf:.2f}` | Отчет: `{ord_str} число`"
+            if is_bg
+            else f"✅ Budget updated! Income: `€{income:.2f}` | Invest/Buffer: `€{inv_budget:.2f}` | Buffer: `€{buf:.2f}` | Report: `{ord_str}`"
+        ),
         reply_markup=get_reply_keyboard(db_user),
     )
 
 
 async def cmd_set_buffer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Quickly update current emergency buffer amount (e.g. /set_buffer 150)."""
     user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
     args = context.args or []
     if len(args) < 1:
         await safe_reply(
-            update.message,
-            f"🛡️ *ТВОЯТ ЛИКВИДЕН БУФЕР (Revolut / Кеш):*\n"
-            f"Текущо: `€{user.emergency_buffer_current:,.2f}` / Цел: `€{user.emergency_buffer_target:,.2f}`\n\n"
-            "За да обновиш сумата на буфера, напиши:\n"
-            "`/set_buffer ТЕКУЩА_СУМА [ЦЕЛ]` _(напр._ `/set_buffer 150` _или_ `/set_buffer 0 500`_)_",
+            update.effective_message,
+            f"🛡️ *Ликвиден буфер:* `€{user.emergency_buffer_current:,.2f}` / цел `€{user.emergency_buffer_target:,.2f}`\n"
+            "Промяна: `/set_buffer ТЕКУЩА_СУМА [ЦЕЛ]`"
+            if is_bg
+            else f"🛡️ *Liquidity Buffer:* `€{user.emergency_buffer_current:,.2f}` / target `€{user.emergency_buffer_target:,.2f}`\n"
+            "Update: `/set_buffer CURRENT_AMOUNT [TARGET]`",
         )
         return
-
     try:
         cur_buf = float(args[0].replace(",", "."))
         target_buf = float(args[1].replace(",", ".")) if len(args) >= 2 else user.emergency_buffer_target
     except ValueError:
-        await safe_reply(update.message, "❌ Моля, въведи валидна сума (напр. `/set_buffer 150`).")
+        await safe_reply(update.effective_message, "❌ Invalid number. Example: `/set_buffer 150`")
         return
 
     with get_session() as session:
@@ -1326,31 +1735,36 @@ async def cmd_set_buffer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         session.commit()
 
     await safe_reply(
-        update.message,
-        f"✅ Ликвидният ти буфер е обновен: `€{max(0.0, cur_buf):,.2f}` / цел `€{max(0.0, target_buf):,.2f}`!",
+        update.effective_message,
+        f"✅ Ликвидният буфер е обновен: `€{max(0.0, cur_buf):,.2f}` / цел `€{max(0.0, target_buf):,.2f}`!"
+        if is_bg
+        else f"✅ Liquidity buffer updated: `€{max(0.0, cur_buf):,.2f}` / target `€{max(0.0, target_buf):,.2f}`!",
     )
 
 
 async def cmd_set_payday(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Allow any user to customize the day of month (1-31) for their automated monthly report."""
     user = get_or_register_user(update.effective_user)
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     args = context.args or []
     if len(args) != 1:
+        ord_str = format_ordinal(user.payday_day, lang)
         await safe_reply(
-            update.message,
-            f"📅 *НАСТРОЙКА НА ДЕНЯ ЗА МЕСЕЧЕН ОТЧЕТ*\n\n"
-            f"Текущият ти настроен ден е: *{format_bg_ordinal(user.payday_day)} число на месеца*.\n\n"
-            "За да го промениш, изпрати число от `1` до `31`:\n"
-            "`/set_payday ДЕН` _(напр._ `/set_payday 1` _или_ `/set_payday 5`_)_",
+            update.effective_message,
+            f"📅 Текущ ден за автоматичен месечен отчет: *{ord_str} число*.\nПромяна: `/set_payday ДЕН` (1–31)"
+            if is_bg
+            else f"📅 Current automated monthly report day: *{ord_str} of the month*.\nUpdate: `/set_payday DAY` (1–31)",
         )
         return
-
     try:
         day = int(args[0].strip())
         if not (1 <= day <= 31):
             raise ValueError
     except ValueError:
-        await safe_reply(update.message, "❌ Моля, въведи валиден ден от месеца между `1` и `31` (напр. `/set_payday 1`).")
+        await safe_reply(
+            update.effective_message,
+            "❌ Въведи число от 1 до 31." if is_bg else "❌ Please enter a day between 1 and 31.",
+        )
         return
 
     with get_session() as session:
@@ -1359,9 +1773,12 @@ async def cmd_set_payday(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         session.commit()
         session.refresh(db_user)
 
+    ord_str = format_ordinal(day, lang)
     await safe_reply(
-        update.message,
-        f"✅ Денят ти за автоматичен месечен отчет е променен на *{format_bg_ordinal(day)} число на месеца*!",
+        update.effective_message,
+        f"✅ Денят за автоматичен месечен отчет е сменен на *{ord_str} число*!"
+        if is_bg
+        else f"✅ Automated monthly report day updated to the *{ord_str} of each month*!",
         reply_markup=get_reply_keyboard(db_user),
     )
 
@@ -1373,21 +1790,39 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception:
         pass
     user = get_or_register_user(update.effective_user)
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     data = query.data or ""
+
+    if data == "lang_en":
+        await _apply_language_change(query.message, user, "en")
+        return
+    if data == "lang_bg":
+        await _apply_language_change(query.message, user, "bg")
+        return
 
     if data == "act_sync_t212":
         if not user.t212_api_key_enc:
-            await safe_reply(query.message, "⚠️ Първо свържи своя Trading 212 API ключ с `/connect_t212`.")
+            await safe_reply(
+                query.message,
+                "⚠️ Първо свържи своя Trading 212 API ключ с `/connect_t212`."
+                if is_bg
+                else "⚠️ Connect your Read-Only Trading 212 API key first via `/connect_t212`.",
+            )
             return
-        wait_msg = await query.message.reply_text("🔄 Синхронизирам твоя портфейл на живо от Trading 212 API...")
+        wait_msg = await query.message.reply_text(
+            "🔄 Синхронизирам портфейла на живо от Trading 212..."
+            if is_bg
+            else "🔄 Syncing your live portfolio from Trading 212..."
+        )
         with get_session() as session:
             db_user = session.query(User).filter(User.id == user.id).first()
             try:
                 snap = await asyncio.to_thread(sync_user_portfolio, session, db_user)
-                report = format_portfolio_telegram(snap)
+                report = format_portfolio_telegram(snap, lang=get_lang(db_user))
                 await safe_edit(wait_msg, report)
             except Exception as e:
-                await safe_edit(wait_msg, f"❌ Грешка при синхронизация: `{e}`")
+                await safe_edit(wait_msg, f"❌ Sync error: `{e}`")
 
     elif data == "act_monthly_check":
         with get_session() as session:
@@ -1397,7 +1832,7 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     elif data == "act_watchlist":
         with get_session() as session:
-            text, kb = format_watchlist_telegram(session)
+            text, kb = format_watchlist_telegram(session, lang=lang)
         await safe_reply(query.message, text, reply_markup=kb)
 
     elif data == "act_check_alerts":
@@ -1417,36 +1852,31 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     elif data == "act_budget_help":
         context.args = []
-        await safe_reply(
-            query.message,
-            "💳 *НАСТРОЙКА НА ЛИЧНИЯ ТИ БЮДЖЕТ, БУФЕР И КРЕДИТ:*\n\n"
-            "• *Бюджет и буфер:* `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ БУФЕР`\n"
-            "  _(Пример:_ `/set_budget 1200 150 500`_)_\n"
-            "• *Само буфер в Revolut:* `/set_buffer СУМА` _(напр._ `/set_buffer 200`_)_\n"
-            "• *Ден за месечен отчет:* `/set_payday ДЕН` _(напр._ `/set_payday 1`_)_\n"
-            "• *Кредит (ако имаш):* `/set_loan БАНКА ГЛАВНИЦА ГПР% РЕДОВНА ПРЕДСРОЧНА`",
-        )
+        await cmd_set_budget(update, context)
 
     elif data == "agent_top3":
-        await _run_agent_question(
-            query.message.chat,
-            user,
-            "Сравни Обединения Топ 3 днес (подценените акции от моя портфейл срещу общия Watchlist): по-добре ли е да подсиля позиция, която вече притежавам, или да добавя нова компания, и колко да заделя за буфера?",
+        q = (
+            "Сравни Обединения Топ 3 днес (подценените акции от моя портфейл срещу общия Watchlist): по-добре ли е да подсиля своя позиция или да добавя нова, и колко да заделя за буфера?"
+            if is_bg
+            else "Compare today's Unified Top 3 (undervalued holdings in my portfolio vs. shared Watchlist): should I reinforce an existing holding or add a new stock, and how much goes to my cash buffer?"
         )
+        await _run_agent_question(query.message.chat, user, q)
 
     elif data == "agent_portfolio":
-        await _run_agent_question(
-            query.message.chat,
-            user,
-            "Анализирай позициите в моя Trading 212 портфейл днес — кои да подсиля на следващата вноска и от кои сектори да се пазя?",
+        q = (
+            "Анализирай позициите в моя Trading 212 портфейл днес — кои да подсиля и от кои сектори да се пазя?"
+            if is_bg
+            else "Analyze my Trading 212 portfolio today — which undervalued holdings should I reinforce and which sectors should I cap?"
         )
+        await _run_agent_question(query.message.chat, user, q)
 
     elif data == "agent_budget":
-        await _run_agent_question(
-            query.message.chat,
-            user,
-            "Как да разпределя най-разумно месечния си доход между ликвидния буфер, кредита (ако имам) и инвестициите по правилата на Бъфет и Мънгър?",
+        q = (
+            "Как да разпределя най-разумно месечния си доход между ликвидния буфер, кредита и инвестициите по Бъфет и Мънгър?"
+            if is_bg
+            else "How should I allocate my monthly income between my liquidity buffer, high-interest debt, and investments using Buffett & Munger rules?"
         )
+        await _run_agent_question(query.message.chat, user, q)
 
     elif data.startswith("pick_"):
         ticker = data.split("_", 1)[1].strip().upper()
@@ -1456,14 +1886,14 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         parts = data.split("_")
         ticker = parts[1].upper() if len(parts) > 1 else "?"
         amount = parts[2] if len(parts) > 2 else "50"
-        await safe_reply(
-            query.message,
-            f"✅ *Изборът ти е записан за следващата ти инвестиция:*\n\n"
-            f"• *Акция/ETF:* `{ticker}`\n"
-            f"• *Планирана сума:* `€{amount}` (в Trading 212)\n"
-            f"• 💡 _Съвет на Бъфет:_ Провери дали си заделил и планираната сума за ликвидния буфер в Revolut (`€{user.emergency_buffer_current:.0f}/€{user.emergency_buffer_target:.0f}`), "
-            f"а след като купиш `{ticker}`, натисни `🔄 Синхронизирай T212` в `📊 Портфейл`!",
+        msg = (
+            f"✅ *Изборът ти е записан:* `{ticker}` (`€{amount}` в Trading 212).\n"
+            f"💡 _Не забравяй буфера (`€{user.emergency_buffer_current:.0f}/€{user.emergency_buffer_target:.0f}`) и натисни `🔄 Синхронизирай T212` след покупката!_"
+            if is_bg
+            else f"✅ *Buy pick noted:* `{ticker}` (`€{amount}` in Trading 212).\n"
+            f"💡 _Remember your cash buffer (`€{user.emergency_buffer_current:.0f}/€{user.emergency_buffer_target:.0f}`), and tap `🔄 Sync T212 Live` after buying!_"
         )
+        await safe_reply(query.message, msg)
 
     elif data.startswith("buffett_"):
         ticker = data.split("_", 1)[1].strip().upper()
@@ -1477,39 +1907,41 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def on_text_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
-    if "Портфейл" in text:
+    if "Портфейл" in text or "Portfolio" in text:
         await cmd_portfolio(update, context)
-    elif "Месечен отчет" in text:
+    elif "Месечен отчет" in text or "Monthly Check" in text:
         await cmd_monthly_check(update, context)
     elif "Watchlist" in text:
         await cmd_watchlist(update, context)
-    elif "ценови аларми" in text or "Топ 3" in text or "Аларми" in text:
+    elif any(k in text for k in ("ценови аларми", "Топ 3", "Аларми", "Top 3", "Alerts")):
         await cmd_check_alerts(update, context)
-    elif "Бъфет Агент" in text:
+    elif "Бъфет Агент" in text or "Buffett Agent" in text:
         context.args = []
         await cmd_ask(update, context)
-    elif "Бъфет Анализ" in text:
+    elif "Бъфет Анализ" in text or "Buffett Analysis" in text:
         context.args = []
         await cmd_buffett(update, context)
-    elif "Кредит" in text or "Бюджет" in text:
+    elif any(k in text for k in ("Кредит", "Бюджет", "Loans", "Budget")):
         await cmd_set_loan(update, context)
         await cmd_set_budget(update, context)
-    elif "Trading 212" in text:
+    elif "Trading 212" in text or "Connect T212" in text:
+        context.args = []
         await cmd_connect_t212(update, context)
-    elif "Помощ" in text:
+    elif "Език" in text or "Language" in text:
+        context.args = []
+        await cmd_lang(update, context)
+    elif "Помощ" in text or text in ("ℹ️ Help", "Help"):
         await cmd_help(update, context)
     elif len(text) <= 6 and text.replace(".", "").isalpha():
-        # Single stock ticker (e.g. INTU, KO, ASML, RR.L) -> Instant Buffett stock analysis!
         user = get_or_register_user(update.effective_user)
         await _run_buffett_analysis_reply(update.effective_chat, user, text.upper())
     elif len(text) >= 4:
-        # Any free-text question in Bulgarian/English -> Conversational Buffett & Munger Agent!
         user = get_or_register_user(update.effective_user)
         await _run_agent_question(update.effective_chat, user, text)
 
 
 async def scheduled_watchlist_alert_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Weekly background job (every Monday): refreshes live prices and pushes personalized Top 3 + Buy Alerts to all users."""
+    """Weekly Monday scan: pushes localized Unified Top 3 & Buy Alerts to every user."""
     triggered_ids = await asyncio.to_thread(_run_watchlist_check_isolated)
     with get_session() as session:
         user_ids = [u.id for u in session.query(User).filter(User.telegram_id != 0).all()]
@@ -1536,64 +1968,63 @@ async def scheduled_watchlist_alert_job(context: ContextTypes.DEFAULT_TYPE) -> N
             )
             text, kb = build_top3_and_alerts_report(session, u, triggered, latest_snap, port_evals)
             chat_id = u.telegram_id
-        try:
-            await safe_send(
-                context.bot,
-                chat_id,
-                f"📅 *СЕДМИЧЕН ПРЕГЛЕД НА ПАЗАРА (ПОНЕДЕЛНИК)*\n\n{text}",
-                reply_markup=kb,
+            hdr = (
+                "📅 *СЕДМИЧЕН ПРЕГЛЕД НА ПАЗАРА (ПОНЕДЕЛНИК)*"
+                if get_lang(u) == "bg"
+                else "📅 *WEEKLY MARKET SCAN (MONDAY)*"
             )
+        try:
+            await safe_send(context.bot, chat_id, f"{hdr}\n\n{text}", reply_markup=kb)
         except Exception as e:
-            logger.warning("Failed to send weekly Top 3 alert to user %s: %s", chat_id, e)
+            logger.warning("Failed to send weekly alert to user %s: %s", chat_id, e)
 
 
 async def scheduled_monthly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Daily check: sends the automated dynamic monthly report on each user's configured payday (default 1st for friends, 13th for owner)."""
+    """Daily check: sends each user's localized dynamic monthly report on their configured payday."""
     now = datetime.now()
     today_day = now.day
     last_day_of_month = calendar.monthrange(now.year, now.month)[1]
     with get_session() as session:
         all_users = session.query(User).filter(User.telegram_id != 0).all()
-        users = [
-            u for u in all_users
-            if min(max(1, u.payday_day), last_day_of_month) == today_day
-        ]
+        users = [u for u in all_users if min(max(1, u.payday_day), last_day_of_month) == today_day]
         for u in users:
             try:
                 if u.t212_api_key_enc:
                     await asyncio.to_thread(sync_user_portfolio, session, u)
+                lang = get_lang(u)
                 report = generate_monthly_check_report(session, u)
-                kb = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🏆 Избери от Топ 3 днес", callback_data="act_check_alerts")]]
+                btn_lbl = "🏆 Избери от Топ 3 днес" if lang == "bg" else "🏆 Pick from Top 3 Today"
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_lbl, callback_data="act_check_alerts")]])
+                ord_str = format_ordinal(u.payday_day, lang)
+                hdr = (
+                    f"🔔 *АВТОМАТИЧЕН МЕСЕЧЕН ОТЧЕТ ({ord_str} число)*"
+                    if lang == "bg"
+                    else f"🔔 *AUTOMATED MONTHLY REPORT ({ord_str} of the month)*"
                 )
-                await safe_send(
-                    context.bot,
-                    u.telegram_id,
-                    f"🔔 *АВТОМАТИЧЕН МЕСЕЧЕН ОТЧЕТ ({format_bg_ordinal(u.payday_day)} число)*\n\n{report}",
-                    reply_markup=kb,
-                )
+                await safe_send(context.bot, u.telegram_id, f"{hdr}\n\n{report}", reply_markup=kb)
             except Exception as e:
                 logger.warning("Failed to send monthly report to user %s: %s", u.telegram_id, e)
 
 
 async def post_init_setup(application: Application) -> None:
-    """Register clean native Telegram '/' slash commands menu for mobile and desktop users."""
+    """Register clean international '/' slash commands menu in Telegram."""
     commands = [
-        BotCommand("start", "Начало и главно меню"),
-        BotCommand("check_alerts", "Обединен Топ 3 (Watchlist vs Портфейл) и аларми"),
-        BotCommand("portfolio", "Моят Trading 212 портфейл"),
-        BotCommand("monthly_check", "Месечен финансов отчет и план"),
-        BotCommand("watchlist", "Общ Бъфет Watchlist (за цялата група)"),
-        BotCommand("ask", "Попитай Бъфет & Мънгър AI Агента"),
-        BotCommand("buffett", "10-точков Бъфет анализ на акция (/buffett INTU)"),
-        BotCommand("add_watch", "Добави акция в общия Watchlist"),
-        BotCommand("set_budget", "Настрой доход, инвест. бюджет и буфер"),
-        BotCommand("set_buffer", "Обнови ликвидния буфер (Revolut/кеш)"),
-        BotCommand("set_loan", "Добави/обнови кредит (Инверсия на Мънгър)"),
-        BotCommand("set_payday", "Смени деня за автоматичния месечен отчет"),
-        BotCommand("connect_t212", "Свържи Trading 212 API (Read-Only)"),
-        BotCommand("set_gemini_key", "Добави безплатен Gemini AI ключ (без .env)"),
-        BotCommand("help", "Пълни инструкции как работи ботът"),
+        BotCommand("start", "Start & main menu"),
+        BotCommand("check_alerts", "Unified Top 3 (Watchlist vs Portfolio) & buy alerts"),
+        BotCommand("portfolio", "Your live Trading 212 portfolio"),
+        BotCommand("monthly_check", "Dynamic monthly financial check & plan"),
+        BotCommand("watchlist", "Shared Buffett & Munger Watchlist"),
+        BotCommand("ask", "Ask the Buffett & Munger AI Agent"),
+        BotCommand("buffett", "10-point Buffett stock scorecard (/buffett INTU)"),
+        BotCommand("add_watch", "Add a stock to the shared Watchlist"),
+        BotCommand("set_budget", "Set income, invest budget & cash buffer"),
+        BotCommand("set_buffer", "Update emergency cash buffer"),
+        BotCommand("set_loan", "Track a high-interest loan (Munger's Inversion)"),
+        BotCommand("set_payday", "Set day of month for automated monthly report"),
+        BotCommand("connect_t212", "Connect Read-Only Trading 212 API"),
+        BotCommand("set_gemini_key", "Add free Gemini AI key (encrypted, no .env)"),
+        BotCommand("lang", "Switch language: English (default) / Bulgarian"),
+        BotCommand("help", "Full user guide & instructions"),
     ]
     try:
         await application.bot.set_my_commands(commands)
@@ -1603,7 +2034,7 @@ async def post_init_setup(application: Application) -> None:
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
-    """Lightweight HTTP health endpoint for Render Free Web Service & UptimeRobot (uses 0 AI tokens)."""
+    """Lightweight HTTP health endpoint for Render Free Web Service & UptimeRobot (0 AI tokens)."""
 
     def do_GET(self) -> None:
         if self.path in ("/", "/health", "/healthz"):
@@ -1627,12 +2058,10 @@ class _HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format: str, *args) -> None:
-        # Suppress noisy access logs on every UptimeRobot ping
         return
 
 
 def start_health_server_if_needed() -> ThreadingHTTPServer | None:
-    """Bind an HTTP health server on $PORT when deployed on Render/cloud (or ENABLE_HEALTH_SERVER=1)."""
     port_str = os.environ.get("PORT", "").strip()
     if not port_str and os.environ.get("ENABLE_HEALTH_SERVER", "").strip() != "1":
         return None
@@ -1645,7 +2074,6 @@ def start_health_server_if_needed() -> ThreadingHTTPServer | None:
 
 
 def main() -> None:
-    # Bind health port first on Render so port-scan succeeds immediately even while DB/T212 initializes
     start_health_server_if_needed()
 
     init_db()
@@ -1653,13 +2081,14 @@ def main() -> None:
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token or token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("⚠️ Липсва TELEGRAM_BOT_TOKEN в .env / Environment Variables!")
+        print("⚠️ Missing TELEGRAM_BOT_TOKEN in .env / Environment Variables!")
         return
 
     app = Application.builder().token(token).post_init(post_init_setup).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("connect_t212", cmd_connect_t212))
     app.add_handler(CommandHandler("set_gemini_key", cmd_set_gemini_key))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
@@ -1678,7 +2107,6 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_menu))
 
     if app.job_queue:
-        # Weekly Top 3 + watchlist alerts: every Monday (day=1 in 0=Sun..6=Sat) at 15:00 UTC (17:00 BG time)
         app.job_queue.run_daily(scheduled_watchlist_alert_job, time=dtime(hour=15, minute=0), days=(1,))
         app.job_queue.run_daily(scheduled_monthly_report_job, time=dtime(hour=9, minute=0))
 

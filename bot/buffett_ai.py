@@ -1,4 +1,4 @@
-"""Warren Buffett & Charlie Munger Dynamic Investment Agent, Top-3 Picker, and Monthly Check Engine."""
+"""Bilingual (EN default / BG switchable) Warren Buffett & Charlie Munger Dynamic Investment Agent."""
 
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from sqlalchemy.orm import Session
 from bot.crypto import decrypt_secret
+from bot.i18n import format_ordinal, get_lang, localize_moat
 from bot.market_service import fetch_stock_fundamentals
 from bot.models import PortfolioSnapshot, User, UserLoan, WatchlistItem
 from bot.t212_service import SEMICONDUCTOR_SHORT_TICKERS, parse_t212_snapshot
@@ -14,23 +15,23 @@ from bot.t212_service import SEMICONDUCTOR_SHORT_TICKERS, parse_t212_snapshot
 BROAD_EU_ETFS = {"VWCE", "IWDA", "SXR8", "CSPX", "EUNL", "VUAA", "SPYI", "WEBN"}
 SKIP_SINGLE_STOCK_VALUATION_ETFS = BROAD_EU_ETFS | {"SEC0", "XDWU", "ESIF", "BGX", "EXX5", "QDVE", "EQQQ"}
 
-KNOWN_MOAT_SUMMARIES = {
-    "V": "Двустранен мрежови ефект + Глобален разплащателен тол-мост • Стабилен",
-    "MA": "Двустранен мрежови ефект + Глобален разплащателен тол-мост • Стабилен",
-    "SPGI": "Институционален рейтингов олигопол + S&P 500 индекси • Стабилен",
-    "MSFT": "Неразрушими разходи за смяна (Enterprise Cloud / Office / Windows) • Разширяващ се",
-    "GOOGL": "Мрежови ефект + Данни + Search / YouTube / Cloud екосистема • Стабилен",
-    "META": "Глобален социален мрежови ефект (3.2B+ потребители) • Стабилен",
-    "AMZN": "Логистичен мащаб + AWS облачен лидер + Prime екосистема • Разширяващ се",
-    "ZTS": "Патенти и лидерство №1 във ветеринарната медицина • Стабилен",
-    "UNH": "Мащаб #1 в здравното застраховане + Optum данни • Стабилен",
-    "JPM": "Мащаб + Крепостен баланс #1 в американското банкиране • Стабилен",
-    "NFLX": "Мащаб #1 в стрийминга + Глобален абонаментен модел • Разширяващ се",
-    "AVGO": "Персонализирани AI чипове + VMware разходи за смяна • Стабилен",
-    "NVDA": "CUDA софтуерна екосистема + Лидер в AI ускорителите • Под карантина (SEC)",
-}
+CORE_BUFFETT_SYSTEM_PROMPT_EN = """You are a personal financial and investment analyst following the complete Warren Buffett & Charlie Munger value investing system.
+Always reply in clear, concise English — specific, grounded in exact numbers, with zero fluff.
 
-CORE_BUFFETT_SYSTEM_PROMPT = """Ти си личен финансов и инвестиционен агент по пълната система на Уорън Бъфет и Чарли Мънгър.
+1. Investment Framework (Buffett & Munger):
+- 8-Point Quick Filter: Circle of competence, 10+ yr durability, economic moat (type + direction: widening / stable / narrowing), pricing power (+5-10%), cash conversion (OCF/Net Income > 90%), debt safety (Net Debt/EBITDA < 2.0x; -30% revenue stress test), management integrity ($1 retained earnings test; auto-veto on fraud), and Margin of Safety (MoS 20-50%).
+- Core Metrics: Owner Earnings (OCF - Maintenance CapEx, separating Growth CapEx), 10-yr ROIC > 15%. For banks/insurers: ROE > 15%, ROA > 1.2%, CET1 > 10%, Combined Ratio < 100%, Float.
+- 4 Sell Criteria: (1) Price massively exceeds Intrinsic Value; (2) Moat permanently eroded; (3) Management dishonesty / fraud (immediate sell); (4) Clearly superior opportunity with a much larger MoS. Never sell solely due to short-term Mr. Market volatility.
+
+2. Personal Capital Management Rules:
+- Munger's Inversion: Eliminate guaranteed high-interest debt (>10-12% APR) before deploying all surplus into risk assets.
+- Liquidity Buffer: Maintain an emergency cash buffer (target €500) so you are never forced to sell great businesses. If below target, prioritize building it.
+- Sector Concentration Cap: Maximum 20-25% in any single risky sector (track total semiconductor exposure). If chips > 20%, do NOT recommend buying more semiconductors.
+- Tax awareness: Broad EU-regulated UCITS ETFs (like VWCE) enjoy favorable long-term tax treatment in many EU jurisdictions (0% CGT in Bulgaria) vs. US single stocks.
+- Work ONLY from the real portfolio, Watchlist, and live market/Google Search data provided. Never fabricate prices or holdings.
+"""
+
+CORE_BUFFETT_SYSTEM_PROMPT_BG = """Ти си личен финансов и инвестиционен агент по пълната система на Уорън Бъфет и Чарли Мънгър.
 Отговаряй на чист български език — конкретно, кратко, с точни числа и без общи приказки.
 
 1. Инвестиционна рамка (Бъфет & Мънгър):
@@ -48,20 +49,11 @@ CORE_BUFFETT_SYSTEM_PROMPT = """Ти си личен финансов и инв�
 
 
 def format_bg_ordinal(day: int) -> str:
-    """Format a day of month (1-31) in natural Bulgarian ordinal neuter form (1-во, 2-ро, 13-то...)."""
-    if day in (1, 21, 31):
-        return f"{day}-во"
-    if day in (2, 22):
-        return f"{day}-ро"
-    if day in (7, 8, 27, 28):
-        return f"{day}-мо"
-    if day in (5, 6, 25, 26, 29, 30):
-        return f"{day}-о"
-    return f"{day}-то"
+    return format_ordinal(day, "bg")
 
 
 def _get_gemini_api_key(user: User | None = None, session: Session | None = None) -> str:
-    """Resolve Gemini API key: 1) User's own encrypted key (/set_gemini_key), 2) Server .env, 3) Owner's shared key in DB."""
+    """Resolve Gemini API key: 1) User's encrypted key (/set_gemini_key), 2) Server .env, 3) Owner's shared key in DB."""
     if user and getattr(user, "gemini_api_key_enc", None):
         try:
             k = decrypt_secret(user.gemini_api_key_enc).strip()
@@ -94,9 +86,9 @@ def _get_gemini_api_key(user: User | None = None, session: Session | None = None
     return ""
 
 
-def load_buffett_system_instruction(include_references: bool = False) -> str:
-    """Return the token-optimized, self-contained Buffett & Munger system instruction (~70% fewer tokens, cloud-safe)."""
-    return CORE_BUFFETT_SYSTEM_PROMPT
+def load_buffett_system_instruction(include_references: bool = False, lang: str = "en") -> str:
+    """Return the token-optimized, cloud-safe Buffett & Munger system prompt in 'en' or 'bg'."""
+    return CORE_BUFFETT_SYSTEM_PROMPT_BG if lang == "bg" else CORE_BUFFETT_SYSTEM_PROMPT_EN
 
 
 def _w_get(watch_item: WatchlistItem | dict | None, key: str, default=None):
@@ -107,8 +99,13 @@ def _w_get(watch_item: WatchlistItem | dict | None, key: str, default=None):
     return getattr(watch_item, key, default)
 
 
-def compute_quantitative_buffett_scorecard(metrics: dict, watch_item: WatchlistItem | dict | None = None) -> dict:
+def compute_quantitative_buffett_scorecard(
+    metrics: dict,
+    watch_item: WatchlistItem | dict | None = None,
+    lang: str = "en",
+) -> dict:
     """Compute a deterministic Buffett & Munger quantitative scorecard and intrinsic value range."""
+    is_bg = lang == "bg"
     price = metrics.get("price") or _w_get(watch_item, "last_price") or 0.0
     roic = metrics.get("roic_est_pct") or _w_get(watch_item, "roic_pct")
     roe = metrics.get("roe_pct")
@@ -120,10 +117,7 @@ def compute_quantitative_buffett_scorecard(metrics: dict, watch_item: WatchlistI
     rev_growth = metrics.get("revenue_growth_pct") or 8.0
     sector = str(metrics.get("sector") or "")
     industry = str(metrics.get("industry") or "")
-    is_bank_or_insurer = (
-        sector == "Financial Services"
-        and any(k in industry for k in ("Bank", "Insurance"))
-    )
+    is_bank_or_insurer = sector == "Financial Services" and any(k in industry for k in ("Bank", "Insurance"))
 
     w_iv_low = _w_get(watch_item, "intrinsic_value_low")
     w_iv_high = _w_get(watch_item, "intrinsic_value_high")
@@ -133,7 +127,6 @@ def compute_quantitative_buffett_scorecard(metrics: dict, watch_item: WatchlistI
         target_buy = float(_w_get(watch_item, "target_buy_price") or iv_low * 0.85)
         mos_req = float(_w_get(watch_item, "margin_of_safety_pct") or 25.0)
     elif is_bank_or_insurer and price > 0:
-        # Buffett banking/insurance playbook: value on normalized EPS + ROE (not deposit-distorted OCF)
         pe = metrics.get("pe_trailing") or metrics.get("pe_forward")
         roe_val = float(roe or 12.0)
         bank_mult_low = 11.0 if roe_val >= 15.0 else (9.5 if roe_val >= 12.0 else 8.0)
@@ -167,7 +160,6 @@ def compute_quantitative_buffett_scorecard(metrics: dict, watch_item: WatchlistI
 
         if oe_yield and oe_yield > 0 and price > 0:
             oe_per_share = price * (oe_yield / 100.0)
-            # Anchor Owner Earnings against normalized EPS to prevent Growth CapEx or WC distortion
             if norm_eps and norm_eps > 0:
                 if ocf > 0 and (ni <= 0 or ocf >= ni * 0.70):
                     oe_per_share = max(norm_eps * 0.80, min(oe_per_share, norm_eps * 1.15))
@@ -192,53 +184,121 @@ def compute_quantitative_buffett_scorecard(metrics: dict, watch_item: WatchlistI
     passed = 0
 
     eff_roic = roe if is_bank_or_insurer else (roic if roic is not None else roe)
+    label = "ROE" if is_bank_or_insurer else "ROIC/ROE"
     if eff_roic is not None and eff_roic >= 15.0:
-        label = "ROE" if is_bank_or_insurer else "ROIC/ROE"
-        checks.append(f"✅ Висока възвръщаемост на капитала ({label}: `{eff_roic:.1f}%` >= 15%)")
+        checks.append(
+            f"✅ Висока възвръщаемост на капитала ({label}: `{eff_roic:.1f}%` >= 15%)"
+            if is_bg
+            else f"✅ High Return on Capital ({label}: `{eff_roic:.1f}%` >= 15%)"
+        )
         passed += 1
     elif eff_roic is not None:
-        checks.append(f"⚠️ Възвръщаемост на капитала под целта на Бъфет (`{eff_roic:.1f}%` < 15%)")
+        checks.append(
+            f"⚠️ Възвръщаемост на капитала под целта на Бъфет (`{eff_roic:.1f}%` < 15%)"
+            if is_bg
+            else f"⚠️ Return on Capital below Buffett threshold (`{eff_roic:.1f}%` < 15%)"
+        )
     else:
-        checks.append("ℹ️ ROIC/ROE: Няма достатъчно TTM данни")
+        checks.append("ℹ️ ROIC/ROE: Няма достатъчно TTM данни" if is_bg else "ℹ️ ROIC/ROE: Insufficient TTM data")
 
     if is_bank_or_insurer and roa is not None:
         if roa >= 1.2:
-            checks.append(f"✅ Силна банкова доходност на активите (ROA: `{roa:.2f}%` >= 1.2%)")
+            checks.append(
+                f"✅ Силна банкова доходност на активите (ROA: `{roa:.2f}%` >= 1.2%)"
+                if is_bg
+                else f"✅ Strong Bank Return on Assets (ROA: `{roa:.2f}%` >= 1.2%)"
+            )
             passed += 1
         else:
-            checks.append(f"⚠️ По-ниска банкова доходност на активите (ROA: `{roa:.2f}%` < 1.2%)")
+            checks.append(
+                f"⚠️ По-ниска банкова доходност на активите (ROA: `{roa:.2f}%` < 1.2%)"
+                if is_bg
+                else f"⚠️ Lower Bank Return on Assets (ROA: `{roa:.2f}%` < 1.2%)"
+            )
     elif op_margin is not None and op_margin >= 18.0:
-        checks.append(f"✅ Силна ценова сила и оперативен марж (`{op_margin:.1f}%` >= 18%)")
+        checks.append(
+            f"✅ Силна ценова сила и оперативен марж (`{op_margin:.1f}%` >= 18%)"
+            if is_bg
+            else f"✅ Strong Pricing Power & Operating Margin (`{op_margin:.1f}%` >= 18%)"
+        )
         passed += 1
     elif op_margin is not None:
-        checks.append(f"⚠️ По-нисък оперативен марж (`{op_margin:.1f}%`)")
+        checks.append(
+            f"⚠️ По-нисък оперативен марж (`{op_margin:.1f}%`)"
+            if is_bg
+            else f"⚠️ Modest Operating Margin (`{op_margin:.1f}%`)"
+        )
 
     if not is_bank_or_insurer:
         if cash_conv is not None and cash_conv >= 90.0:
-            checks.append(f"✅ Отлично качество на печалбата (OCF/Net Income: `{cash_conv:.0f}%` > 90%)")
+            checks.append(
+                f"✅ Отлично качество на печалбата (OCF/Net Income: `{cash_conv:.0f}%` > 90%)"
+                if is_bg
+                else f"✅ Strong Earnings Quality (OCF/Net Income: `{cash_conv:.0f}%` > 90%)"
+            )
             passed += 1
         elif cash_conv is not None:
-            checks.append(f"⚠️ По-слаба кешова конверсия (OCF/Net Income: `{cash_conv:.0f}%` < 90%)")
+            checks.append(
+                f"⚠️ По-слаба кешова конверсия (OCF/Net Income: `{cash_conv:.0f}%` < 90%)"
+                if is_bg
+                else f"⚠️ Lower Cash Conversion (OCF/Net Income: `{cash_conv:.0f}%` < 90%)"
+            )
 
         if metrics.get("net_debt", 0) <= 0:
-            checks.append("✅ Крепостен баланс: Повече кеш, отколкото дълг (Net Cash)")
+            checks.append(
+                "✅ Крепостен баланс: Повече кеш, отколкото дълг (Net Cash)"
+                if is_bg
+                else "✅ Fortress Balance Sheet: More Cash than Debt (Net Cash)"
+            )
             passed += 1
         elif nd_ebitda is not None and nd_ebitda < 2.0:
-            checks.append(f"✅ Консервативен дълг (Net Debt/EBITDA: `{nd_ebitda:.2f}x` < 2.0x)")
+            checks.append(
+                f"✅ Консервативен дълг (Net Debt/EBITDA: `{nd_ebitda:.2f}x` < 2.0x)"
+                if is_bg
+                else f"✅ Conservative Debt (Net Debt/EBITDA: `{nd_ebitda:.2f}x` < 2.0x)"
+            )
             passed += 1
         elif nd_ebitda is not None:
-            checks.append(f"⚠️ По-висок дълг (Net Debt/EBITDA: `{nd_ebitda:.2f}x` >= 2.0x)")
+            checks.append(
+                f"⚠️ По-висок дълг (Net Debt/EBITDA: `{nd_ebitda:.2f}x` >= 2.0x)"
+                if is_bg
+                else f"⚠️ Elevated Leverage (Net Debt/EBITDA: `{nd_ebitda:.2f}x` >= 2.0x)"
+            )
 
     if price > 0 and price <= target_buy:
-        checks.append(f"🟢 В ЗОНАТА ЗА ПОКУПКА! Текуща цена `{price:.2f}` <= Target Buy `{target_buy:.2f}`")
+        checks.append(
+            f"🟢 В ЗОНАТА ЗА ПОКУПКА! Текуща цена `{price:.2f}` <= Target Buy `{target_buy:.2f}`"
+            if is_bg
+            else f"🟢 IN BUY ZONE! Current price `{price:.2f}` <= Target Buy `{target_buy:.2f}`"
+        )
         passed += 1
-        verdict = "🟢 КУПИ (В зоната за покупка с Марж на безопасност)"
+        verdict = (
+            "🟢 КУПИ (В зоната за покупка с Марж на безопасност)"
+            if is_bg
+            else "🟢 BUY (In Buy Zone with Margin of Safety)"
+        )
     elif price > 0 and price <= iv_high:
-        checks.append(f"🟡 Справедлива цена (`{price:.2f}`), но изчакай Target Buy `<= {target_buy:.2f}` за пълен марж на безопасност")
-        verdict = "🟡 ЗАДРЪЖ / ИЗЧАКАЙ КОРЕКЦИЯ ДО TARGET BUY"
+        checks.append(
+            f"🟡 Справедлива цена (`{price:.2f}`), но изчакай Target Buy `<= {target_buy:.2f}` за пълен марж на безопасност"
+            if is_bg
+            else f"🟡 Fairly Valued (`{price:.2f}`), wait for Target Buy `<= {target_buy:.2f}` for full Margin of Safety"
+        )
+        verdict = (
+            "🟡 ЗАДРЪЖ / ИЗЧАКАЙ КОРЕКЦИЯ ДО TARGET BUY"
+            if is_bg
+            else "🟡 HOLD / WAIT FOR PULLBACK TO TARGET BUY"
+        )
     else:
-        checks.append(f"🔴 Надценена спрямо консервативната Бъфет оценка (`{price:.2f}` > `{iv_high:.2f}`)")
-        verdict = "⏳ ИЗЧАКАЙ КОРЕКЦИЯ (Твърде скъпа в момента)"
+        checks.append(
+            f"🔴 Надценена спрямо консервативната Бъфет оценка (`{price:.2f}` > `{iv_high:.2f}`)"
+            if is_bg
+            else f"🔴 Overvalued vs. conservative Buffett valuation (`{price:.2f}` > `{iv_high:.2f}`)"
+        )
+        verdict = (
+            "⏳ ИЗЧАКАЙ КОРЕКЦИЯ (Твърде скъпа в момента)"
+            if is_bg
+            else "⏳ WAIT FOR CORRECTION (Too expensive right now)"
+        )
 
     return {
         "iv_low": iv_low,
@@ -252,12 +312,9 @@ def compute_quantitative_buffett_scorecard(metrics: dict, watch_item: WatchlistI
     }
 
 
-def rank_portfolio_buy_candidates(parsed_snap: dict | None) -> dict:
-    """Dynamically rank the best positions to buy RIGHT NOW inside the user's actual Trading 212 pies.
-
-    Never hardcodes stock names — adapts automatically on every payday (13th / 1st) based on live
-    underweight gaps, P&L pullbacks, broad EU ETF tax efficiency, and the 20-25% semiconductor cap.
-    """
+def rank_portfolio_buy_candidates(parsed_snap: dict | None, lang: str = "en") -> dict:
+    """Dynamically rank the best positions to buy RIGHT NOW inside the user's actual Trading 212 pies."""
+    is_bg = lang == "bg"
     if not parsed_snap or not parsed_snap.get("pies"):
         return {"pies": [], "top_overall": [], "semi_blocked": False, "semi_pct": 0.0}
 
@@ -285,36 +342,45 @@ def rank_portfolio_buy_candidates(parsed_snap: dict | None) -> dict:
                 blocked.append(
                     {
                         "ticker": ticker,
-                        "reason": f"полупроводници са {semi_pct:.1f}% (>20% таван)",
+                        "reason": (
+                            f"полупроводници са {semi_pct:.1f}% (>20% таван)"
+                            if is_bg
+                            else f"semiconductors at {semi_pct:.1f}% (>20% cap)"
+                        ),
                         "cur_pct": cur_pct,
                         "exp_pct": exp_pct,
                     }
                 )
                 continue
 
-            # Dynamic Buffett/Rebalancing score:
-            # 1) Underweight vs target share (+3.5 pts per 1% underweight)
-            # 2) Trading at pullback / below avg price (lower ppl_pct gets higher score)
-            # 3) Broad 0%-tax UCITS ETF bonus in ETF pies
             is_broad_etf = ticker in BROAD_EU_ETFS
             score = (underweight * 3.5) + max(-15.0, min(25.0, -ppl_pct * 0.9))
             if is_broad_etf:
                 score += 18.0
-            # Penalize significantly overweight single stocks (>2% above target)
             if cur_pct > exp_pct + 2.0 and not is_broad_etf:
                 score -= 20.0
 
             reason_parts = []
             if is_broad_etf:
-                reason_parts.append("0% данък в ЕС + глобална диверсификация")
+                reason_parts.append(
+                    "0% данък в ЕС + глобална диверсификация" if is_bg else "EU UCITS ETF + global diversification"
+                )
             if underweight > 0.3:
-                reason_parts.append(f"под целта с -{underweight:.1f}%")
+                reason_parts.append(f"под целта с -{underweight:.1f}%" if is_bg else f"underweight by -{underweight:.1f}%")
             if ppl_pct < 0:
-                reason_parts.append(f"на отстъпка ({ppl_pct:.1f}% под ср. цена)")
+                reason_parts.append(
+                    f"на отстъпка ({ppl_pct:.1f}% под ср. цена)" if is_bg else f"pullback ({ppl_pct:.1f}% below avg cost)"
+                )
             elif ppl_pct < 5.0 and not is_broad_etf:
-                reason_parts.append(f"близо до ср. цена (+{ppl_pct:.1f}%)")
+                reason_parts.append(
+                    f"близо до ср. цена (+{ppl_pct:.1f}%)" if is_bg else f"near avg cost (+{ppl_pct:.1f}%)"
+                )
             if not reason_parts:
-                reason_parts.append(f"стабилна позиция (дял {cur_pct:.1f}%/{exp_pct:.0f}%)")
+                reason_parts.append(
+                    f"стабилна позиция (дял {cur_pct:.1f}%/{exp_pct:.0f}%)"
+                    if is_bg
+                    else f"steady holding (wt {cur_pct:.1f}%/{exp_pct:.0f}%)"
+                )
 
             cand = {
                 "pie_name": pie["name"],
@@ -355,8 +421,12 @@ def evaluate_user_portfolio_undervalued(
     session: Session,
     user: User,
     latest_snap: PortfolioSnapshot | None = None,
+    lang: str | None = None,
 ) -> list[dict]:
-    """Scan all individual stocks in the user's OWN Trading 212 portfolio for Buffett undervaluation (live prices + Owner Earnings IV)."""
+    """Scan all individual stocks in the user's OWN Trading 212 portfolio for Buffett undervaluation."""
+    eff_lang = lang or get_lang(user)
+    is_bg = eff_lang == "bg"
+
     if not latest_snap or not latest_snap.raw_json:
         return []
     try:
@@ -368,7 +438,6 @@ def evaluate_user_portfolio_undervalued(
     semi_pct = float(parsed.get("semiconductor_pct") or 0.0)
     semi_blocked = semi_pct >= 20.0
 
-    # Collect unique single stocks held by this user (excluding ETFs)
     held_map: dict[str, dict] = {}
     for pie in parsed.get("pies") or []:
         for inst in pie.get("instruments") or []:
@@ -387,7 +456,6 @@ def evaluate_user_portfolio_undervalued(
     if not held_map:
         return []
 
-    # Pre-extract plain dicts from shared Watchlist BEFORE spawning threads (100% SQLAlchemy thread-safe)
     owner = session.query(User).order_by(User.id.asc()).first()
     master_id = owner.id if owner else 1
     watch_by_ticker = {
@@ -409,7 +477,7 @@ def evaluate_user_portfolio_undervalued(
             if not metrics or not metrics.get("price"):
                 return None
             w_item = watch_by_ticker.get(ticker)
-            score = compute_quantitative_buffett_scorecard(metrics, w_item)
+            score = compute_quantitative_buffett_scorecard(metrics, w_item, lang=eff_lang)
             price = float(metrics["price"])
             iv_low = float(score["iv_low"])
             iv_high = float(score["iv_high"])
@@ -421,22 +489,31 @@ def evaluate_user_portfolio_undervalued(
 
             cur = metrics.get("currency", "USD")
             sym = "$" if cur == "USD" else ("p " if cur == "GBX" else "€")
-            moat = (
-                (w_item.get("moat_summary") if w_item and w_item.get("moat_summary") else None)
-                or KNOWN_MOAT_SUMMARIES.get(ticker)
-                or f"ROIC: {metrics.get('roic_est_pct') or 'N/A'}% | Опер. марж: {metrics.get('operating_margin_pct') or 'N/A'}%"
-            )
+            stored_moat = w_item.get("moat_summary") if w_item else None
+            moat = localize_moat(ticker, stored_moat, eff_lang)
+            if moat in ("Wide Economic Moat", "Широк конкурентен ров"):
+                roic_s = metrics.get("roic_est_pct") or "N/A"
+                om_s = metrics.get("operating_margin_pct") or "N/A"
+                moat = f"ROIC: {roic_s}% | Опер. марж: {om_s}%" if is_bg else f"ROIC: {roic_s}% | Op. Margin: {om_s}%"
+
             info = held_map[ticker]
             invested = max(1.0, info["value"] - info["ppl"])
             ppl_pct = round((info["ppl"] / invested) * 100.0, 1)
             underweight = round(info["exp_pct"] - info["cur_pct"], 1)
 
-            # Ranking score: Buy Zone + Discount to IV + Underweight gap; penalize chips if >20%
             rank_score = (discount_high_pct * 1.6) + (underweight * 3.0)
             if in_buy_zone:
                 rank_score += 30.0
             if semi_blocked and is_chip:
                 rank_score -= 60.0
+
+            sector_warn = ""
+            if semi_blocked and is_chip:
+                sector_warn = (
+                    f"⚠️ Полупроводници са {semi_pct:.1f}% (>20%)"
+                    if is_bg
+                    else f"⚠️ Semiconductors at {semi_pct:.1f}% (>20% cap)"
+                )
 
             return {
                 "ticker": ticker,
@@ -450,7 +527,7 @@ def evaluate_user_portfolio_undervalued(
                 "in_buy_zone": in_buy_zone,
                 "is_undervalued": is_undervalued,
                 "is_chip": is_chip,
-                "sector_warn": f"⚠️ Полупроводници са {semi_pct:.1f}% (>20%)" if (semi_blocked and is_chip) else "",
+                "sector_warn": sector_warn,
                 "moat_summary": moat,
                 "pie_name": info["pie_name"],
                 "cur_pct": info["cur_pct"],
@@ -477,8 +554,12 @@ def rank_top3_watchlist_opportunities(
     session: Session,
     user: User,
     latest_snap: PortfolioSnapshot | None = None,
+    lang: str | None = None,
 ) -> list[dict]:
     """Dynamically rank the Top 3 best investment opportunities from the shared Buffett Watchlist right now."""
+    eff_lang = lang or get_lang(user)
+    is_bg = eff_lang == "bg"
+
     owner = session.query(User).order_by(User.id.asc()).first()
     master_id = owner.id if owner else 1
     items = (
@@ -501,13 +582,11 @@ def rank_top3_watchlist_opportunities(
         iv_high = float(w.intrinsic_value_high or (w.target_buy_price * 1.45))
         iv_mid = (iv_low + iv_high) / 2.0
 
-        # Positive gap_to_buy_pct means ALREADY below Target Buy Price!
         gap_to_buy_pct = round(((w.target_buy_price - w.last_price) / w.target_buy_price) * 100.0, 1)
         mos_mid_pct = round(((iv_mid - w.last_price) / iv_mid) * 100.0, 1) if iv_mid > 0 else 0.0
         in_buy_zone = w.last_price <= w.target_buy_price
         is_chip = w.ticker.upper() in SEMICONDUCTOR_SHORT_TICKERS
 
-        # Score: prioritize Buy Zone + high Margin of Safety + ROIC > 15%; penalize chips if user > 20%
         score = (gap_to_buy_pct * 2.2) + (mos_mid_pct * 1.3)
         if in_buy_zone:
             score += 35.0
@@ -518,13 +597,29 @@ def rank_top3_watchlist_opportunities(
 
         sym = "$" if w.currency == "USD" else ("p " if w.currency == "GBX" else "€")
         if in_buy_zone:
-            status_tag = f"🟢 В ЗОНА ЗА ПОКУПКА (+{mos_mid_pct:.0f}% MoS)"
+            status_tag = (
+                f"🟢 В ЗОНА ЗА ПОКУПКА (+{mos_mid_pct:.0f}% MoS)"
+                if is_bg
+                else f"🟢 IN BUY ZONE (+{mos_mid_pct:.0f}% MoS)"
+            )
         elif gap_to_buy_pct >= -12.0:
-            status_tag = f"🟡 На {abs(gap_to_buy_pct):.1f}% от Target Buy (MoS: {mos_mid_pct:+.0f}%)"
+            status_tag = (
+                f"🟡 На {abs(gap_to_buy_pct):.1f}% от Target Buy (MoS: {mos_mid_pct:+.0f}%)"
+                if is_bg
+                else f"🟡 {abs(gap_to_buy_pct):.1f}% above Target Buy (MoS: {mos_mid_pct:+.0f}%)"
+            )
         else:
-            status_tag = f"⏳ Чакаме корекция ({abs(gap_to_buy_pct):.0f}% над Target Buy)"
+            status_tag = (
+                f"⏳ Чакаме корекция ({abs(gap_to_buy_pct):.0f}% над Target Buy)"
+                if is_bg
+                else f"⏳ Wait for pullback ({abs(gap_to_buy_pct):.0f}% above Target Buy)"
+            )
 
-        sector_warn = "⚠️ Чипове >20% в портфейла" if (semi_blocked and is_chip) else ""
+        sector_warn = (
+            ("⚠️ Чипове >20% в портфейла" if is_bg else "⚠️ Chips >20% in portfolio")
+            if (semi_blocked and is_chip)
+            else ""
+        )
         scored.append(
             {
                 "item": w,
@@ -542,7 +637,7 @@ def rank_top3_watchlist_opportunities(
                 "sector_warn": sector_warn,
                 "status_tag": status_tag,
                 "roic_pct": w.roic_pct,
-                "moat_summary": w.moat_summary or "Широк конкурентен ров",
+                "moat_summary": localize_moat(w.ticker, w.moat_summary, eff_lang),
                 "score": round(score, 2),
             }
         )
@@ -556,12 +651,12 @@ def rank_unified_top3_opportunities(
     user: User,
     latest_snap: PortfolioSnapshot | None = None,
     portfolio_evals: list[dict] | None = None,
+    lang: str | None = None,
 ) -> dict:
-    """Head-to-head Top 3 Buffett ranking comparing BOTH the shared Watchlist AND the user's own Trading 212 portfolio.
+    """Head-to-head Top 3 Buffett ranking comparing BOTH the shared Watchlist AND the user's Trading 212 portfolio."""
+    eff_lang = lang or get_lang(user)
+    is_bg = eff_lang == "bg"
 
-    Lets every user see immediately whether today's best euro should reinforce an undervalued stock
-    they ALREADY own (💼 Подсили) or open a new discounted position from the Watchlist (🎯 Нов от Watchlist).
-    """
     owner = session.query(User).order_by(User.id.asc()).first()
     master_id = owner.id if owner else 1
     watch_items = (
@@ -573,11 +668,8 @@ def rank_unified_top3_opportunities(
 
     semi_pct = float(latest_snap.semiconductor_pct) if latest_snap else 0.0
     semi_blocked = semi_pct >= 20.0
-
-    # Map of unified candidates keyed by ticker (deduplicated if present in both Watchlist & Portfolio)
     candidates: dict[str, dict] = {}
 
-    # 1. Pool A: Shared Watchlist candidates
     for w in watch_items:
         if w.last_price is None or w.last_price <= 0 or not w.target_buy_price:
             continue
@@ -604,17 +696,29 @@ def rank_unified_top3_opportunities(
 
         sym = "$" if w.currency == "USD" else ("p " if w.currency == "GBX" else "€")
         if in_buy_zone:
-            status_tag = f"🟢 В ЗОНА ЗА ПОКУПКА (+{mos_mid_pct:.0f}% MoS)"
+            status_tag = (
+                f"🟢 В ЗОНА ЗА ПОКУПКА (+{mos_mid_pct:.0f}% MoS)"
+                if is_bg
+                else f"🟢 IN BUY ZONE (+{mos_mid_pct:.0f}% MoS)"
+            )
         elif gap_to_buy_pct >= -12.0:
-            status_tag = f"🟡 На {abs(gap_to_buy_pct):.1f}% от Target Buy (MoS: {mos_mid_pct:+.0f}%)"
+            status_tag = (
+                f"🟡 На {abs(gap_to_buy_pct):.1f}% от Target Buy (MoS: {mos_mid_pct:+.0f}%)"
+                if is_bg
+                else f"🟡 {abs(gap_to_buy_pct):.1f}% above Target Buy (MoS: {mos_mid_pct:+.0f}%)"
+            )
         else:
-            status_tag = f"⏳ {abs(gap_to_buy_pct):.0f}% над Target Buy"
+            status_tag = (
+                f"⏳ {abs(gap_to_buy_pct):.0f}% над Target Buy"
+                if is_bg
+                else f"⏳ {abs(gap_to_buy_pct):.0f}% above Target Buy"
+            )
 
         candidates[t] = {
             "ticker": t,
             "company_name": w.company_name or t,
             "source": "watchlist",
-            "source_badge": "🎯 Watchlist (нова)",
+            "source_badge": "🎯 Watchlist (нова)" if is_bg else "🎯 Watchlist (new)",
             "btn_icon": "🎯",
             "currency_sym": sym,
             "last_price": price,
@@ -626,17 +730,20 @@ def rank_unified_top3_opportunities(
             "gap_to_buy_pct": gap_to_buy_pct,
             "in_buy_zone": in_buy_zone,
             "is_chip": is_chip,
-            "sector_warn": f"Чипове {semi_pct:.1f}% >20%" if (semi_blocked and is_chip) else "",
+            "sector_warn": (
+                (f"Чипове {semi_pct:.1f}% >20%" if is_bg else f"Chips {semi_pct:.1f}% >20%")
+                if (semi_blocked and is_chip)
+                else ""
+            ),
             "status_tag": status_tag,
             "roic_pct": w.roic_pct,
-            "moat_summary": w.moat_summary or "Широк конкурентен ров",
+            "moat_summary": localize_moat(t, w.moat_summary, eff_lang),
             "cur_pct": None,
             "exp_pct": None,
             "pie_name": None,
             "score": round(score, 2),
         }
 
-    # 2. Pool B: User's OWN Trading 212 Portfolio stocks (evaluated live!)
     for p in (portfolio_evals or []):
         t = p["ticker"].upper()
         price = float(p["last_price"])
@@ -661,8 +768,6 @@ def rank_unified_top3_opportunities(
             score += 35.0
         if roic_val and roic_val >= 15.0:
             score += min(12.0, (roic_val - 10.0) * 0.4)
-        # Buffett concentration/rebalancing adjustment: gently favor underweight great businesses you already know,
-        # and penalize already-overweight single positions so users don't over-concentrate
         if underweight > 0:
             score += min(10.0, underweight * 2.5)
         elif cur_pct > exp_pct + 1.5 and exp_pct > 0:
@@ -671,18 +776,34 @@ def rank_unified_top3_opportunities(
             score -= 80.0
 
         if in_buy_zone:
-            status_tag = f"🟢 В ЗОНА ЗА ПОКУПКА (+{mos_mid_pct:.0f}% MoS)"
+            status_tag = (
+                f"🟢 В ЗОНА ЗА ПОКУПКА (+{mos_mid_pct:.0f}% MoS)"
+                if is_bg
+                else f"🟢 IN BUY ZONE (+{mos_mid_pct:.0f}% MoS)"
+            )
         elif price <= iv_high:
-            status_tag = f"🟡 Подценена (+{p['discount_pct']:.0f}% до IV, дял {cur_pct:.1f}%/{exp_pct:.0f}%)"
+            status_tag = (
+                f"🟡 Подценена (+{p['discount_pct']:.0f}% до IV, дял {cur_pct:.1f}%/{exp_pct:.0f}%)"
+                if is_bg
+                else f"🟡 Undervalued (+{p['discount_pct']:.0f}% to IV, wt {cur_pct:.1f}%/{exp_pct:.0f}%)"
+            )
         else:
-            status_tag = f"⏳ {abs(gap_to_buy_pct):.0f}% над Target Buy"
+            status_tag = (
+                f"⏳ {abs(gap_to_buy_pct):.0f}% над Target Buy"
+                if is_bg
+                else f"⏳ {abs(gap_to_buy_pct):.0f}% above Target Buy"
+            )
 
         already_in_wl = t in candidates
         candidates[t] = {
             "ticker": t,
             "company_name": p["company_name"],
             "source": "both" if already_in_wl else "portfolio",
-            "source_badge": f"💼 Твой портфейл (подсили {cur_pct:.1f}%/{exp_pct:.0f}%)",
+            "source_badge": (
+                f"💼 Твой портфейл (подсили {cur_pct:.1f}%/{exp_pct:.0f}%)"
+                if is_bg
+                else f"💼 Your Portfolio (reinforce {cur_pct:.1f}%/{exp_pct:.0f}%)"
+            ),
             "btn_icon": "💼",
             "currency_sym": p["currency_sym"],
             "last_price": price,
@@ -694,10 +815,14 @@ def rank_unified_top3_opportunities(
             "gap_to_buy_pct": gap_to_buy_pct,
             "in_buy_zone": in_buy_zone,
             "is_chip": is_chip,
-            "sector_warn": f"Чипове {semi_pct:.1f}% >20%" if (semi_blocked and is_chip) else "",
+            "sector_warn": (
+                (f"Чипове {semi_pct:.1f}% >20%" if is_bg else f"Chips {semi_pct:.1f}% >20%")
+                if (semi_blocked and is_chip)
+                else ""
+            ),
             "status_tag": status_tag,
             "roic_pct": roic_val,
-            "moat_summary": p["moat_summary"],
+            "moat_summary": localize_moat(t, p.get("moat_summary"), eff_lang),
             "cur_pct": cur_pct,
             "exp_pct": exp_pct,
             "pie_name": p["pie_name"],
@@ -705,11 +830,9 @@ def rank_unified_top3_opportunities(
         }
 
     ranked_all = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)
-    # Enforce Buffett/Munger Sector Cap Iron Rule: exclude blocked semiconductors from Top 3 buy picks when >20%
     eligible_for_top3 = [x for x in ranked_all if not (semi_blocked and x["is_chip"])]
     top3 = (eligible_for_top3 or ranked_all)[:3]
 
-    # Build a crisp head-to-head comparison takeaway for the user
     has_port = [x for x in top3 if x["source"] in ("portfolio", "both")]
     has_wl = [x for x in top3 if x["source"] == "watchlist"]
     insight = ""
@@ -720,22 +843,33 @@ def rank_unified_top3_opportunities(
             insight = (
                 f"Днес *`{p1['ticker']}`* (вече в портфейла ти) води класирането — можеш да я подсилиш на отстъпка "
                 f"без да раздробяваш портфейла, или да добавиш нова позиция в *`{w1['ticker']}`* от Watchlist."
+                if is_bg
+                else f"Today *`{p1['ticker']}`* (already in your portfolio) leads the ranking — reinforce it at a discount "
+                f"without diluting focus, or open a new position in *`{w1['ticker']}`* from the Watchlist."
             )
         else:
             insight = (
                 f"Днес *`{w1['ticker']}`* (нова от Watchlist) предлага най-висок марж на безопасност, "
                 f"а *`{p1['ticker']}`* е най-силната подценена позиция за подсилване вътре в портфейла ти!"
+                if is_bg
+                else f"Today *`{w1['ticker']}`* (new from Watchlist) offers the highest Margin of Safety, "
+                f"while *`{p1['ticker']}`* is the strongest undervalued holding to reinforce inside your portfolio!"
             )
     elif has_port:
         p1 = has_port[0]
         insight = (
             f"Днес най-добрите сделки са *вътре в твоя портфейл* (води *`{p1['ticker']}`*) — "
             "по Бъфет е по-умно да подсилиш чудесен бизнес, който вече притежаваш на отстъпка, вместо да купуваш по-скъпа нова компания!"
+            if is_bg
+            else f"Today's best bargains are *inside your own portfolio* (led by *`{p1['ticker']}`*) — "
+            "per Buffett, reinforcing a great business you already own at a discount beats adding a pricier new stock!"
         )
     elif has_wl:
         w1 = has_wl[0]
         insight = (
             f"Днес *`{w1['ticker']}`* от общия Watchlist предлага по-добра цена и марж на безопасност от акциите в портфейла."
+            if is_bg
+            else f"Today *`{w1['ticker']}`* from the shared Watchlist offers a stronger Margin of Safety than existing holdings."
         )
 
     return {"top3": top3, "all_ranked": ranked_all, "comparison_insight": insight}
@@ -746,7 +880,9 @@ def build_dynamic_investment_plan_lines(
     user: User,
     latest_snap: PortfolioSnapshot | None = None,
 ) -> list[str]:
-    """Build a 100% dynamic, non-hardcoded monthly investment plan from live portfolio, loans, buffer, and Watchlist."""
+    """Build a 100% dynamic, non-hardcoded monthly investment plan in 'en' or 'bg'."""
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     cur = "€" if user.t212_currency == "EUR" else user.t212_currency
     lines: list[str] = []
 
@@ -764,7 +900,6 @@ def build_dynamic_investment_plan_lines(
     )
     high_apr_loans = [l for l in active_loans if l.apr_percent >= 10.0]
 
-    # 1. Dynamic Emergency Buffer Rule (Buffett's Liquidity Rule)
     buf_missing = max(0.0, round(user.emergency_buffer_target - user.emergency_buffer_current, 2))
     inv_budget = float(user.monthly_invest_budget or 0.0)
     investable_now = inv_budget
@@ -772,69 +907,98 @@ def build_dynamic_investment_plan_lines(
     if buf_missing > 0 and inv_budget > 0:
         suggested_to_buffer = round(min(buf_missing, max(50.0, inv_budget * 0.45)), 2)
         investable_now = round(max(0.0, inv_budget - suggested_to_buffer), 2)
-        lines.append(
-            f"🛡️ *ПРИОРИТЕТ — Ликвиден буфер:* Текущо `{cur}{user.emergency_buffer_current:,.2f}` / цел `{cur}{user.emergency_buffer_target:,.2f}` "
-            f"_(липсват `{cur}{buf_missing:,.2f}`)_. По правилото на Бъфет задели първо *`{cur}{suggested_to_buffer:,.2f}`* към Revolut буфера, "
-            f"а останалите *`{cur}{investable_now:,.2f}`* инвестирай в Trading 212!"
-        )
+        if is_bg:
+            lines.append(
+                f"🛡️ *ПРИОРИТЕТ — Ликвиден буфер:* Текущо `{cur}{user.emergency_buffer_current:,.2f}` / цел `{cur}{user.emergency_buffer_target:,.2f}` "
+                f"_(липсват `{cur}{buf_missing:,.2f}`)_. По правилото на Бъфет задели първо *`{cur}{suggested_to_buffer:,.2f}`* към буфера, "
+                f"а останалите *`{cur}{investable_now:,.2f}`* инвестирай в Trading 212!"
+            )
+        else:
+            lines.append(
+                f"🛡️ *PRIORITY — Liquidity Buffer:* Current `{cur}{user.emergency_buffer_current:,.2f}` / target `{cur}{user.emergency_buffer_target:,.2f}` "
+                f"_(missing `{cur}{buf_missing:,.2f}`)_. Per Buffett's liquidity rule, allocate *`{cur}{suggested_to_buffer:,.2f}`* to your cash buffer first, "
+                f"and invest the remaining *`{cur}{investable_now:,.2f}`* in Trading 212!"
+            )
     elif buf_missing > 0:
         lines.append(
             f"🛡️ *Ликвиден буфер:* Текущо `{cur}{user.emergency_buffer_current:,.2f}` / цел `{cur}{user.emergency_buffer_target:,.2f}` — "
             "изгради си неприкосновен буфер преди рискови покупки, за да не си принуден никога да продаваш добри акции."
+            if is_bg
+            else f"🛡️ *Liquidity Buffer:* Current `{cur}{user.emergency_buffer_current:,.2f}` / target `{cur}{user.emergency_buffer_target:,.2f}` — "
+            "build your emergency cash reserve first so you are never forced to sell great businesses."
         )
 
-    # 2. Dynamic High-Interest Loan Payoff Projection (Munger's Inversion)
     if high_apr_loans:
-        total_loan_pmt = 0.0
         for l in high_apr_loans:
             fee = round(l.early_principal_payment * (l.early_fee_percent / 100.0), 2) if l.early_principal_payment > 0 else 0.0
             pmt = round(l.regular_payment + l.early_principal_payment + fee, 2)
-            total_loan_pmt += pmt
             principal_reduction_mo = max(1.0, l.early_principal_payment + l.regular_payment * 0.84)
             months_left = max(1, math.ceil(l.principal_balance / principal_reduction_mo))
-            lines.append(
-                f"💳 *Инверсия на Мънгър ({l.lender_name} — {l.apr_percent:.2f}% ГПР):* "
-                f"`{cur}{pmt:,.2f}/мес.` → остават ~`{months_left}` мес. до `€0` дълг, след което тези `{cur}{pmt:,.2f}/мес.` се освобождават за инвестиции!"
-            )
+            if is_bg:
+                lines.append(
+                    f"💳 *Инверсия на Мънгър ({l.lender_name} — {l.apr_percent:.2f}% ГПР):* "
+                    f"`{cur}{pmt:,.2f}/мес.` → остават ~`{months_left}` мес. до `€0` дълг, след което тези `{cur}{pmt:,.2f}/мес.` се освобождават за инвестиции!"
+                )
+            else:
+                lines.append(
+                    f"💳 *Munger's Inversion ({l.lender_name} — {l.apr_percent:.2f}% APR):* "
+                    f"`{cur}{pmt:,.2f}/mo` → ~`{months_left}` mos left to debt-free, unlocking `{cur}{pmt:,.2f}/mo` for investing!"
+                )
 
     if inv_budget <= 0:
-        lines.append("💡 _Настрой месечния си бюджет с_ `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ БУФЕР`_, за да изчислява ботът точните суми._")
+        lines.append(
+            "💡 _Настрой месечния си бюджет с_ `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ БУФЕР`_, за да изчислява ботът точните суми._"
+            if is_bg
+            else "💡 _Configure your monthly budget via_ `/set_budget INCOME INVEST_BUDGET BUFFER` _to unlock exact allocations._"
+        )
         return lines
 
-    # 3. Dynamic Per-Pie Live Recommendations (from actual T212 snapshot!)
-    ranked_port = rank_portfolio_buy_candidates(parsed_snap)
+    ranked_port = rank_portfolio_buy_candidates(parsed_snap, lang=lang)
     if ranked_port["pies"]:
         if ranked_port["semi_blocked"]:
             lines.append(
                 f"⚠️ *Сектор Полупроводници е `{ranked_port['semi_pct']:.2f}%` (>20% таван):* "
                 "Ботът автоматично изключи чиповете от днешните покупки."
+                if is_bg
+                else f"⚠️ *Semiconductors at `{ranked_port['semi_pct']:.2f}%` (>20% cap):* "
+                "Chips are automatically excluded from today's buy plan."
             )
         total_pie_val = sum(p["pie_value"] for p in ranked_port["pies"]) or 1.0
         for p in ranked_port["pies"]:
             weight = p["pie_value"] / total_pie_val if len(ranked_port["pies"]) > 1 else 1.0
             pie_alloc = round(investable_now * weight, 2)
-            top_tickers = ", ".join(
-                f"`{c['ticker']}` ({c['reason']})" for c in p["top_picks"][:3]
-            )
+            top_tickers = ", ".join(f"`{c['ticker']}` ({c['reason']})" for c in p["top_picks"][:3])
             blocked_tickers = ", ".join(f"`{b['ticker']}`" for b in p["blocked"])
-            blocked_note = f" | *€0 за:* {blocked_tickers}" if blocked_tickers else ""
-            lines.append(
-                f"🥧 *{p['pie_name']}:* `~{cur}{pie_alloc:,.2f}` → Топ избор днес: {top_tickers or 'Няма подходящи'}{blocked_note}"
-            )
+            if is_bg:
+                blocked_note = f" | *€0 за:* {blocked_tickers}" if blocked_tickers else ""
+                lines.append(
+                    f"🥧 *{p['pie_name']}:* `~{cur}{pie_alloc:,.2f}` → Топ избор днес: {top_tickers or 'Няма подходящи'}{blocked_note}"
+                )
+            else:
+                blocked_note = f" | *€0 for:* {blocked_tickers}" if blocked_tickers else ""
+                lines.append(
+                    f"🥧 *{p['pie_name']}:* `~{cur}{pie_alloc:,.2f}` → Top picks today: {top_tickers or 'None eligible'}{blocked_note}"
+                )
     else:
         lines.append(
             f"📈 *Месечна инвестиция:* `{cur}{investable_now:,.2f}` — насочи към широк UCITS ETF (`VWCE`, 0% данък в ЕС) "
             "и най-подценените компании от Топ 3 на общия Watchlist."
+            if is_bg
+            else f"📈 *Monthly Investment:* `{cur}{investable_now:,.2f}` — allocate to a broad UCITS ETF (`VWCE`) "
+            "and the most undervalued Top-3 picks from the shared Watchlist."
         )
 
-    # 4. Dynamic Top 3 Opportunities from Watchlist RIGHT NOW
-    top3_wl = rank_top3_watchlist_opportunities(session, user, latest_snap)
+    top3_wl = rank_top3_watchlist_opportunities(session, user, latest_snap, lang=lang)
     if top3_wl:
         wl_str = " | ".join(
             f"*#{i+1} `{x['ticker']}`* (`{x['currency_sym']}{x['last_price']:.2f}`, {x['status_tag']})"
             for i, x in enumerate(top3_wl)
         )
-        lines.append(f"🌟 *Топ 3 идеи от Watchlist днес:* {wl_str}")
+        lines.append(
+            f"🌟 *Топ 3 идеи от Watchlist днес:* {wl_str}"
+            if is_bg
+            else f"🌟 *Top 3 Watchlist Ideas Today:* {wl_str}"
+        )
 
     return lines
 
@@ -846,48 +1010,77 @@ def analyze_stock_with_buffett(
     latest_snap: PortfolioSnapshot | None = None,
     session: Session | None = None,
 ) -> str:
-    """Produce a full Bulgarian Buffett & Munger stock report (Quantitative + Gemini 4 Hydrogen AI)."""
+    """Produce a full English (default) or Bulgarian Buffett & Munger stock report."""
+    lang = get_lang(user)
+    is_bg = lang == "bg"
     cur = metrics.get("currency", "USD")
     sym = "$" if cur == "USD" else ("p " if cur == "GBX" else ("€" if cur == "EUR" else f"{cur} "))
     price = metrics.get("price") or (watch_item.last_price if watch_item else None) or 0.0
-    score = compute_quantitative_buffett_scorecard(metrics, watch_item)
+    score = compute_quantitative_buffett_scorecard(metrics, watch_item, lang=lang)
 
     mcap_b = (metrics.get("market_cap") or 0.0) / 1e9
     oe_b = (metrics.get("owner_earnings_est") or 0.0) / 1e9
     nd_b = (metrics.get("net_debt") or 0.0) / 1e9
+    nd_ebitda_s = f"{metrics.get('net_debt_to_ebitda')}x" if metrics.get("net_debt_to_ebitda") is not None else "Net Cash"
 
-    header_lines = [
-        f"🧠 *БЪФЕТ & МЪНГЪР АНАЛИЗ: {metrics['ticker']} ({metrics['name']})*",
-        f"🏷️ *Сектор:* {metrics.get('sector', 'N/A')} | {metrics.get('industry', 'N/A')}",
-        "",
-        "📊 *1. Ключови фундаментални метрики (TTM):*",
-        f"  • *Текуща цена:* `{sym}{price:,.2f}` (Пазарна кап.: `{sym}{mcap_b:,.1f}B`)",
-        f"  • *P/E (Trailing / Forward):* `{metrics.get('pe_trailing') or 'N/A'}` / `{metrics.get('pe_forward') or 'N/A'}`",
-        f"  • *Брутен / Оперативен марж:* `{metrics.get('gross_margin_pct') or 'N/A'}%` / `{metrics.get('operating_margin_pct') or 'N/A'}%`",
-        f"  • *ROIC (оценка) / ROE:* `{metrics.get('roic_est_pct') or (watch_item.roic_pct if watch_item else 'N/A')}%` / `{metrics.get('roe_pct') or 'N/A'}%`",
-        f"  • *Owner Earnings (OCF - Maint. CapEx):* `{sym}{oe_b:,.2f}B` (Yield: `{metrics.get('owner_earnings_yield_pct') or 'N/A'}%`)",
-        f"  • *Кешова конверсия (OCF / Net Income):* `{metrics.get('cash_conversion_pct') or 'N/A'}%`",
-        f"  • *Нетен дълг (Net Debt):* `{sym}{nd_b:,.2f}B` (Net Debt/EBITDA: `{metrics.get('net_debt_to_ebitda') if metrics.get('net_debt_to_ebitda') is not None else 'Net Cash'}x`)",
-    ]
+    if is_bg:
+        header_lines = [
+            f"🧠 *БЪФЕТ & МЪНГЪР АНАЛИЗ: {metrics['ticker']} ({metrics['name']})*",
+            f"🏷️ *Сектор:* {metrics.get('sector', 'N/A')} | {metrics.get('industry', 'N/A')}",
+            "",
+            "📊 *1. Ключови фундаментални метрики (TTM):*",
+            f"  • *Текуща цена:* `{sym}{price:,.2f}` (Пазарна кап.: `{sym}{mcap_b:,.1f}B`)",
+            f"  • *P/E (Trailing / Forward):* `{metrics.get('pe_trailing') or 'N/A'}` / `{metrics.get('pe_forward') or 'N/A'}`",
+            f"  • *Брутен / Оперативен марж:* `{metrics.get('gross_margin_pct') or 'N/A'}%` / `{metrics.get('operating_margin_pct') or 'N/A'}%`",
+            f"  • *ROIC (оценка) / ROE:* `{metrics.get('roic_est_pct') or (watch_item.roic_pct if watch_item else 'N/A')}%` / `{metrics.get('roe_pct') or 'N/A'}%`",
+            f"  • *Owner Earnings (OCF - Maint. CapEx):* `{sym}{oe_b:,.2f}B` (Yield: `{metrics.get('owner_earnings_yield_pct') or 'N/A'}%`)",
+            f"  • *Кешова конверсия (OCF / Net Income):* `{metrics.get('cash_conversion_pct') or 'N/A'}%`",
+            f"  • *Нетен дълг (Net Debt):* `{sym}{nd_b:,.2f}B` (Net Debt/EBITDA: `{nd_ebitda_s}`)",
+        ]
+    else:
+        header_lines = [
+            f"🧠 *BUFFETT & MUNGER ANALYSIS: {metrics['ticker']} ({metrics['name']})*",
+            f"🏷️ *Sector:* {metrics.get('sector', 'N/A')} | {metrics.get('industry', 'N/A')}",
+            "",
+            "📊 *1. Key Fundamental Metrics (TTM):*",
+            f"  • *Current Price:* `{sym}{price:,.2f}` (Market Cap: `{sym}{mcap_b:,.1f}B`)",
+            f"  • *P/E (Trailing / Forward):* `{metrics.get('pe_trailing') or 'N/A'}` / `{metrics.get('pe_forward') or 'N/A'}`",
+            f"  • *Gross / Operating Margin:* `{metrics.get('gross_margin_pct') or 'N/A'}%` / `{metrics.get('operating_margin_pct') or 'N/A'}%`",
+            f"  • *ROIC (est.) / ROE:* `{metrics.get('roic_est_pct') or (watch_item.roic_pct if watch_item else 'N/A')}%` / `{metrics.get('roe_pct') or 'N/A'}%`",
+            f"  • *Owner Earnings (OCF - Maint. CapEx):* `{sym}{oe_b:,.2f}B` (Yield: `{metrics.get('owner_earnings_yield_pct') or 'N/A'}%`)",
+            f"  • *Cash Conversion (OCF / Net Income):* `{metrics.get('cash_conversion_pct') or 'N/A'}%`",
+            f"  • *Net Debt:* `{sym}{nd_b:,.2f}B` (Net Debt/EBITDA: `{nd_ebitda_s}`)",
+        ]
 
-    if watch_item and watch_item.moat_summary:
+    moat_text = localize_moat(metrics["ticker"], watch_item.moat_summary if watch_item else None, lang)
+    if moat_text and moat_text not in ("Wide Economic Moat", "Широк конкурентен ров"):
         header_lines.extend([
             "",
-            f"🏰 *Конкурентен ров (от Watchlist):* {watch_item.moat_summary}",
+            f"🏰 *Конкурентен ров:* {moat_text}" if is_bg else f"🏰 *Economic Moat:* {moat_text}",
         ])
 
-    header_lines.extend([
-        "",
-        "⚖️ *2. Бърз филтър на Бъфет & Оценка на Вътрешната стойност:*",
-        *[f"  {c}" for c in score["checks"]],
-        "",
-        f"🎯 *Вътрешна стойност (Intrinsic Value):* `{sym}{score['iv_low']:,.2f} – {sym}{score['iv_high']:,.2f}`",
-        f"🛡️ *Целева цена за покупка (Target Buy с {score['mos_req']:.0f}% MoS):* `<= {sym}{score['target_buy']:,.2f}`",
-        f"📌 *Присъда:* *{score['verdict']}*",
-    ])
-
-    if watch_item and watch_item.notes:
-        header_lines.append(f"📝 *Бележка:* _{watch_item.notes}_")
+    if is_bg:
+        header_lines.extend([
+            "",
+            "⚖️ *2. Бърз филтър на Бъфет & Оценка на Вътрешната стойност:*",
+            *[f"  {c}" for c in score["checks"]],
+            "",
+            f"🎯 *Вътрешна стойност (Intrinsic Value):* `{sym}{score['iv_low']:,.2f} – {sym}{score['iv_high']:,.2f}`",
+            f"🛡️ *Целева цена за покупка (Target Buy с {score['mos_req']:.0f}% MoS):* `<= {sym}{score['target_buy']:,.2f}`",
+            f"📌 *Присъда:* *{score['verdict']}*",
+        ])
+        if watch_item and watch_item.notes:
+            header_lines.append(f"📝 *Бележка:* _{watch_item.notes}_")
+    else:
+        header_lines.extend([
+            "",
+            "⚖️ *2. Buffett Quick Filter & Intrinsic Valuation:*",
+            *[f"  {c}" for c in score["checks"]],
+            "",
+            f"🎯 *Intrinsic Value Range:* `{sym}{score['iv_low']:,.2f} – {sym}{score['iv_high']:,.2f}`",
+            f"🛡️ *Target Buy Price ({score['mos_req']:.0f}% MoS):* `<= {sym}{score['target_buy']:,.2f}`",
+            f"📌 *Verdict:* *{score['verdict']}*",
+        ])
 
     gemini_key = _get_gemini_api_key(user=user, session=session)
     if gemini_key:
@@ -898,35 +1091,44 @@ def analyze_stock_with_buffett(
             portfolio_ctx = ""
             if latest_snap:
                 portfolio_ctx = (
-                    f"Портфейл на потребителя: Обща стойност €{latest_snap.total_value:.2f}, "
-                    f"Дял полупроводници: {latest_snap.semiconductor_pct:.2f}% (лимит 20-25%)."
+                    f"User portfolio: €{latest_snap.total_value:.0f}, semiconductors {latest_snap.semiconductor_pct:.1f}% (cap 20-25%)."
                 )
-            prompt = (
-                f"Анализирай компанията {metrics['ticker']} ({metrics['name']}) по системата на Уорън Бъфет и Чарли Мънгър.\n"
-                f"Данни: {json.dumps(metrics, ensure_ascii=False)}\n"
-                f"Изчислен диапазон на вътрешна стойност: {sym}{score['iv_low']} - {sym}{score['iv_high']}, "
-                f"Target Buy Price: <= {sym}{score['target_buy']}.\n"
-                f"{portfolio_ctx}\n"
-                "Напиши стегнато обобщение в 4 кратки секции (до 1200 знака общо):\n"
-                "1) Вид и посока на рова (Moat)\n"
-                "2) Мениджмънт и капиталова алокация ($1 тест)\n"
-                "3) Инверсия на Мънгър (Топ 2 риска)\n"
-                "4) Кога да продадем (4-те критерия на Бъфет)."
-            )
+            if is_bg:
+                prompt = (
+                    f"Анализирай {metrics['ticker']} ({metrics['name']}) по Бъфет и Мънгър.\n"
+                    f"Данни: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
+                    "Дай стегнато обобщение в 4 точки (до 1100 знака): 1) Вид и посока на рова; 2) Мениджмънт ($1 тест); "
+                    "3) Инверсия на Мънгър (Топ 2 риска); 4) Кога да продадем (4-те критерия)."
+                )
+            else:
+                prompt = (
+                    f"Analyze {metrics['ticker']} ({metrics['name']}) using Buffett & Munger's framework.\n"
+                    f"Metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
+                    "Write a crisp 4-part summary (under 1100 chars): 1) Moat type & direction; 2) Management & capital allocation ($1 test); "
+                    "3) Munger's Inversion (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
+                )
             interaction = client.interactions.create(
                 model="gemini-4-hydrogen",
-                system_instruction=load_buffett_system_instruction(),
+                system_instruction=load_buffett_system_instruction(lang=lang),
                 input=prompt,
                 tools=[{"type": "google_search"}],
             )
             if interaction and interaction.output_text:
                 header_lines.extend([
                     "",
-                    "🤖 *3. Задълбочен AI Анализ (Бъфет & Мънгър Агент + Живи новини):*",
+                    "🤖 *3. Задълбочен AI Анализ (Бъфет Агент + Живи новини):*"
+                    if is_bg
+                    else "🤖 *3. Deep AI Analysis (Buffett Agent + Live News):*",
                     interaction.output_text.strip(),
                 ])
         except Exception as e:
-            header_lines.append(f"\n_(Бележка: AI коментарът не беше зареден: {e})_")
+            header_lines.append(
+                f"\n_(Бележка: AI коментарът не беше зареден: {e})_"
+                if is_bg
+                else f"\n_(Note: AI commentary unavailable: {e})_"
+            )
 
     return "\n".join(header_lines)
 
@@ -937,7 +1139,10 @@ def ask_buffett_agent(
     question: str,
     latest_snap: PortfolioSnapshot | None = None,
 ) -> str:
-    """Conversational Buffett & Munger Agent inside Telegram with full live portfolio + Watchlist context."""
+    """Conversational Buffett & Munger Agent inside Telegram in 'en' (default) or 'bg'."""
+    lang = get_lang(user)
+    is_bg = lang == "bg"
+
     if latest_snap is None:
         latest_snap = (
             session.query(PortfolioSnapshot)
@@ -958,10 +1163,8 @@ def ask_buffett_agent(
         .filter(UserLoan.user_id == user.id, UserLoan.is_active.is_(True))
         .all()
     )
-    top3_wl = rank_top3_watchlist_opportunities(session, user, latest_snap)
-    ranked_port = rank_portfolio_buy_candidates(parsed_snap)
-    port_evals = evaluate_user_portfolio_undervalued(session, user, latest_snap) if latest_snap else []
-    unified = rank_unified_top3_opportunities(session, user, latest_snap, port_evals)
+    port_evals = evaluate_user_portfolio_undervalued(session, user, latest_snap, lang=lang) if latest_snap else []
+    unified = rank_unified_top3_opportunities(session, user, latest_snap, port_evals, lang=lang)
 
     gemini_key = _get_gemini_api_key(user=user, session=session)
     if gemini_key:
@@ -979,39 +1182,22 @@ def ask_buffett_agent(
                 }
                 for l in active_loans
             ]
-            wl_ctx = [
-                {
-                    "ticker": x["ticker"],
-                    "name": x["company_name"],
-                    "price": x["last_price"],
-                    "target_buy": x["target_buy_price"],
-                    "iv": f"{x['iv_low']}-{x['iv_high']}",
-                    "mos_pct": x["mos_mid_pct"],
-                    "in_buy_zone": x["in_buy_zone"],
-                    "roic": x["roic_pct"],
-                    "moat": x["moat_summary"],
-                }
-                for x in top3_wl
-            ]
-            # Compact portfolio context for AI
             port_ctx = {}
             if parsed_snap:
                 port_ctx = {
                     "total_eur": parsed_snap["total_value"],
                     "unrealized_ppl": parsed_snap["unrealized_ppl"],
                     "semiconductor_pct": parsed_snap["semiconductor_pct"],
-                    "semiconductor_breakdown": parsed_snap["semiconductor_breakdown"],
                     "pies": [
                         {
                             "name": p["name"],
                             "value": p["value"],
                             "instruments": [
                                 {
-                                    "ticker": i["ticker"],
-                                    "val": i["value"],
-                                    "ppl": i["ppl"],
-                                    "cur_pct": i["current_pct"],
-                                    "exp_pct": i["expected_pct"],
+                                    "t": i["ticker"],
+                                    "v": i["value"],
+                                    "cur": i["current_pct"],
+                                    "exp": i["expected_pct"],
                                 }
                                 for i in p["instruments"]
                             ],
@@ -1019,7 +1205,6 @@ def ask_buffett_agent(
                         for p in parsed_snap["pies"]
                     ],
                 }
-
             unified_ctx = [
                 {
                     "ticker": x["ticker"],
@@ -1034,40 +1219,56 @@ def ask_buffett_agent(
             ]
 
             full_prompt = (
-                f"Въпрос ({user.full_name}): {question}\n"
-                f"Профил: доход €{user.monthly_income:.0f}, бюджет €{user.monthly_invest_budget:.0f}, "
-                f"буфер €{user.emergency_buffer_current:.0f}/€{user.emergency_buffer_target:.0f}, отчет {user.payday_day}-о число.\n"
-                f"Кредити: {json.dumps(loans_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
-                f"Портфейл T212: {json.dumps(port_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
-                f"Обединен Топ 3 (Watchlist vs Портфейл): {json.dumps(unified_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
-                "Отговори стегнато за Telegram (до 2400 знака), с конкретни числа и ясен избор "
-                "дали да подсили позиция в портфейла или да добави нова от Watchlist."
+                f"User ({user.full_name}) question: {question}\n"
+                f"Profile: income €{user.monthly_income:.0f}, budget €{user.monthly_invest_budget:.0f}, "
+                f"buffer €{user.emergency_buffer_current:.0f}/€{user.emergency_buffer_target:.0f}, payday {user.payday_day}.\n"
+                f"Loans: {json.dumps(loans_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"T212 Portfolio: {json.dumps(port_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"Unified Top 3 (Watchlist vs Portfolio): {json.dumps(unified_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
+                + (
+                    "Отговори стегнато за Telegram на български (до 2400 знака), с конкретни числа и ясен избор дали да подсили позиция в портфейла или да добави нова от Watchlist."
+                    if is_bg
+                    else "Answer concisely for Telegram in English (under 2400 chars), with exact numbers and a clear recommendation on whether to reinforce an existing holding or open a new Watchlist position."
+                )
             )
             interaction = client.interactions.create(
                 model="gemini-4-hydrogen",
-                system_instruction=load_buffett_system_instruction(include_references=True),
+                system_instruction=load_buffett_system_instruction(lang=lang),
                 input=full_prompt,
                 tools=[{"type": "google_search"}],
             )
             if interaction and interaction.output_text:
-                return f"🤖 *БЪФЕТ & МЪНГЪР АГЕНТ:*\n\n{interaction.output_text.strip()}"
+                title = "🤖 *БЪФЕТ & МЪНГЪР АГЕНТ:*" if is_bg else "🤖 *BUFFETT & MUNGER AGENT:*"
+                return f"{title}\n\n{interaction.output_text.strip()}"
         except Exception as e:
-            fallback_note = f"_(AI връзката върна грешка: {e} — показвам живия количествен разчет по Бъфет)_\n\n"
+            fallback_note = (
+                f"_(AI връзката върна грешка: {e} — показвам живия количествен разчет по Бъфет)_\n\n"
+                if is_bg
+                else f"_(AI request failed: {e} — showing live quantitative Buffett calculation)_\n\n"
+            )
     else:
         fallback_note = (
             "💡 _За свободен AI разговор с новини на живо добави безплатен Gemini API ключ направо тук с_ "
             "`/set_gemini_key КЛЮЧ` _(виж ℹ️ Помощ за 30-секундна инструкция). Ето живия ти динамичен разчет в момента:_\n\n"
+            if is_bg
+            else "💡 _For free-form AI chat with live Google Search news, add a free Gemini API key right here via_ "
+            "`/set_gemini_key YOUR_KEY` _(see ℹ️ Help for a 30-second guide). Here is your live quantitative Buffett breakdown:_\n\n"
         )
 
-    # Smart deterministic Buffett Agent answer using unified Watchlist vs Portfolio Top 3 + buffer/loans!
     plan_lines = build_dynamic_investment_plan_lines(session, user, latest_snap)
     lines = [
-        "🤖 *БЪФЕТ & МЪНГЪР АГЕНТ (ДИНАМИЧЕН АНАЛИЗ ДНЕС)*",
+        "🤖 *БЪФЕТ & МЪНГЪР АГЕНТ (ДИНАМИЧЕН АНАЛИЗ ДНЕС)*"
+        if is_bg
+        else "🤖 *BUFFETT & MUNGER AGENT (LIVE QUANTITATIVE ANALYSIS)*",
         fallback_note.strip(),
         "",
     ]
     if unified["top3"]:
-        lines.append("🏆 *ОБЩ ТОП 3 ДНЕС (WATCHLIST vs. ТВОЯТ ПОРТФЕЙЛ):*")
+        lines.append(
+            "🏆 *ОБЩ ТОП 3 ДНЕС (WATCHLIST vs. ТВОЯТ ПОРТФЕЙЛ):*"
+            if is_bg
+            else "🏆 *UNIFIED TOP 3 TODAY (WATCHLIST vs. YOUR PORTFOLIO):*"
+        )
         for idx, x in enumerate(unified["top3"], 1):
             sym = x["currency_sym"]
             lines.append(
@@ -1079,14 +1280,19 @@ def ask_buffett_agent(
         lines.append("")
 
     lines.extend([
-        "📋 *Динамична препоръка според твоя портфейл, буфер и пазарните цени:*",
+        "📋 *Динамична препоръка според твоя портфейл, буфер и пазарните цени:*"
+        if is_bg
+        else "📋 *Dynamic Action Plan based on your portfolio, cash buffer & live prices:*",
         *[f"• {l}" for l in plan_lines],
     ])
     return "\n".join(lines)
 
 
 def generate_monthly_check_report(session: Session, user: User) -> str:
-    """Generate the complete 5-section Monthly Check (/monthly_check) report dynamically (ZERO hardcoding)."""
+    """Generate the complete 5-section Monthly Check (/monthly_check) report dynamically in 'en' or 'bg'."""
+    lang = get_lang(user)
+    is_bg = lang == "bg"
+
     latest_snap = (
         session.query(PortfolioSnapshot)
         .filter(PortfolioSnapshot.user_id == user.id)
@@ -1100,34 +1306,59 @@ def generate_monthly_check_report(session: Session, user: User) -> str:
     )
 
     cur = "€" if user.t212_currency == "EUR" else user.t212_currency
-    day_suffix = format_bg_ordinal(user.payday_day)
+    day_ord = format_ordinal(user.payday_day, lang)
     lines = [
-        f"📅 *МЕСЕЧЕН ФИНАНСОВ ОТЧЕТ ({day_suffix} число на месеца)*",
-        f"👤 *Потребител:* {user.full_name or user.username or user.telegram_id}",
+        (
+            f"📅 *МЕСЕЧЕН ФИНАНСОВ ОТЧЕТ ({day_ord} число на месеца)*"
+            if is_bg
+            else f"📅 *MONTHLY FINANCIAL CHECK ({day_ord} of the month)*"
+        ),
+        (
+            f"👤 *Потребител:* {user.full_name or user.username or user.telegram_id}"
+            if is_bg
+            else f"👤 *Investor:* {user.full_name or user.username or user.telegram_id}"
+        ),
         "",
     ]
 
-    # Section 1: 📊 Състояние на портфейла
-    lines.append("📊 *1. СЪСТОЯНИЕ НА ТВОЯ ПОРТФЕЙЛ*")
+    # Section 1: Portfolio status
+    lines.append("📊 *1. СЪСТОЯНИЕ НА ТВОЯ ПОРТФЕЙЛ*" if is_bg else "📊 *1. YOUR PORTFOLIO SNAPSHOT*")
     if latest_snap:
         ppl_sign = "+" if latest_snap.unrealized_ppl >= 0 else ""
-        semi_warn = (
-            "⚠️ Над тавана от 25% — НЕ добавяй нови полупроводници!"
-            if latest_snap.semiconductor_pct >= 25.0
-            else ("⚡ Над 20% — избягвай нови чипове" if latest_snap.semiconductor_pct >= 20.0 else "✅ В норма (<20%)")
-        )
-        lines.extend([
-            f"  • *Обща стойност в Trading 212:* `{cur}{latest_snap.total_value:,.2f}`",
-            f"  • *Инвестирани позиции:* `{cur}{latest_snap.invested_value:,.2f}` | *Кеш в пайове:* `{cur}{latest_snap.pie_cash:,.2f}`",
-            f"  • *Нереализиран P&L:* `{ppl_sign}{cur}{latest_snap.unrealized_ppl:,.2f}` | *Реализиран:* `+{cur}{latest_snap.realized_result:,.2f}`",
-            f"  • *Сектор Полупроводници:* `{latest_snap.semiconductor_pct:.2f}%` ({semi_warn})",
-        ])
+        if is_bg:
+            semi_warn = (
+                "⚠️ Над тавана от 25% — НЕ добавяй нови полупроводници!"
+                if latest_snap.semiconductor_pct >= 25.0
+                else ("⚡ Над 20% — избягвай нови чипове" if latest_snap.semiconductor_pct >= 20.0 else "✅ В норма (<20%)")
+            )
+            lines.extend([
+                f"  • *Обща стойност в Trading 212:* `{cur}{latest_snap.total_value:,.2f}`",
+                f"  • *Инвестирани позиции:* `{cur}{latest_snap.invested_value:,.2f}` | *Кеш в пайове:* `{cur}{latest_snap.pie_cash:,.2f}`",
+                f"  • *Нереализиран P&L:* `{ppl_sign}{cur}{latest_snap.unrealized_ppl:,.2f}` | *Реализиран:* `+{cur}{latest_snap.realized_result:,.2f}`",
+                f"  • *Сектор Полупроводници:* `{latest_snap.semiconductor_pct:.2f}%` ({semi_warn})",
+            ])
+        else:
+            semi_warn = (
+                "⚠️ Above 25% cap — DO NOT add more semiconductors!"
+                if latest_snap.semiconductor_pct >= 25.0
+                else ("⚡ Above 20% — avoid adding more chips" if latest_snap.semiconductor_pct >= 20.0 else "✅ Healthy (<20%)")
+            )
+            lines.extend([
+                f"  • *Total Trading 212 Value:* `{cur}{latest_snap.total_value:,.2f}`",
+                f"  • *Invested Positions:* `{cur}{latest_snap.invested_value:,.2f}` | *Pie Cash:* `{cur}{latest_snap.pie_cash:,.2f}`",
+                f"  • *Unrealized P&L:* `{ppl_sign}{cur}{latest_snap.unrealized_ppl:,.2f}` | *Realized:* `+{cur}{latest_snap.realized_result:,.2f}`",
+                f"  • *Semiconductor Sector:* `{latest_snap.semiconductor_pct:.2f}%` ({semi_warn})",
+            ])
     else:
-        lines.append("  • _Все още нямаш свързан Trading 212 портфейл. Използвай_ `/connect_t212`_, за да го синхронизираш._")
+        lines.append(
+            "  • _Все още нямаш свързан Trading 212 портфейл. Използвай_ `/connect_t212`_, за да го синхронизираш._"
+            if is_bg
+            else "  • _No Trading 212 portfolio connected yet. Use_ `/connect_t212` _to sync your account._"
+        )
 
-    # Section 2: 🏆 Динамичен Топ 3 от Общия Watchlist днес
-    lines.extend(["", "🧠 *2. ТОП 3 ВЪЗМОЖНОСТИ ОТ WATCHLIST ДНЕС*"])
-    top3_wl = rank_top3_watchlist_opportunities(session, user, latest_snap)
+    # Section 2: Top 3 Watchlist
+    lines.extend(["", "🧠 *2. ТОП 3 ВЪЗМОЖНОСТИ ОТ WATCHLIST ДНЕС*" if is_bg else "🧠 *2. TOP 3 WATCHLIST OPPORTUNITIES TODAY*"])
+    top3_wl = rank_top3_watchlist_opportunities(session, user, latest_snap, lang=lang)
     if top3_wl:
         for i, item in enumerate(top3_wl, 1):
             warn = f" ({item['sector_warn']})" if item["sector_warn"] else ""
@@ -1136,10 +1367,10 @@ def generate_monthly_check_report(session: Session, user: User) -> str:
                 f"| Target Buy `<= {item['currency_sym']}{item['target_buy_price']:.2f}` | {item['status_tag']}{warn}"
             )
     else:
-        lines.append("  • ⏳ В момента няма заредени компании в Watchlist-а.")
+        lines.append("  • ⏳ Няма заредени компании в Watchlist." if is_bg else "  • ⏳ No stocks in Watchlist yet.")
 
-    # Section 3: 💳 Действие по кредити (Инверсия на Мънгър)
-    lines.extend(["", "💳 *3. ДЕЙСТВИЕ ПО КРЕДИТИ (Инверсия на Мънгър)*"])
+    # Section 3: Debt Action (Munger's Inversion)
+    lines.extend(["", "💳 *3. ДЕЙСТВИЕ ПО КРЕДИТИ (Инверсия на Мънгър)*" if is_bg else "💳 *3. DEBT ACTION (Munger's Inversion)*"])
     total_loan_outflow = 0.0
     if active_loans:
         for loan in active_loans:
@@ -1147,37 +1378,64 @@ def generate_monthly_check_report(session: Session, user: User) -> str:
             monthly_loan_total = round(loan.regular_payment + loan.early_principal_payment + fee_eur, 2)
             total_loan_outflow += monthly_loan_total
             new_principal_est = max(0.0, round(loan.principal_balance - loan.early_principal_payment - (loan.regular_payment * 0.84), 2))
-            lines.extend([
-                f"  • *Кредитор:* *{loan.lender_name}* {f'(Договор № {loan.contract_number})' if loan.contract_number else ''}",
-                f"  • *Текуща главница:* `{cur}{loan.principal_balance:,.2f}` при ГПР `{loan.apr_percent:.2f}%`",
-                f"  • *1️⃣ Редовна вноска:* `{cur}{loan.regular_payment:,.2f}`",
-                f"  • *2️⃣ Предсрочно погасяване на главница:* `{cur}{loan.early_principal_payment:,.2f}` (+ такса `{cur}{fee_eur:.2f}`)",
-                f"  • *Общо плащане по кредита за месеца:* `{cur}{monthly_loan_total:,.2f}` _(гарантирана доходност от {loan.apr_percent:.2f}%!)_",
-                f"  • *Очаквана остатъчна главница след плащането:* `~{cur}{new_principal_est:,.2f}`",
-            ])
-            if loan.notes:
-                lines.append(f"  • *План:* _{loan.notes}_")
+            if is_bg:
+                lines.extend([
+                    f"  • *Кредитор:* *{loan.lender_name}* {f'(Договор № {loan.contract_number})' if loan.contract_number else ''}",
+                    f"  • *Текуща главница:* `{cur}{loan.principal_balance:,.2f}` при ГПР `{loan.apr_percent:.2f}%`",
+                    f"  • *1️⃣ Редовна вноска:* `{cur}{loan.regular_payment:,.2f}`",
+                    f"  • *2️⃣ Предсрочно погасяване на главница:* `{cur}{loan.early_principal_payment:,.2f}` (+ такса `{cur}{fee_eur:.2f}`)",
+                    f"  • *Общо плащане по кредита за месеца:* `{cur}{monthly_loan_total:,.2f}` _(гарантирана доходност от {loan.apr_percent:.2f}%!)_",
+                    f"  • *Очаквана остатъчна главница:* `~{cur}{new_principal_est:,.2f}`",
+                ])
+                if loan.notes:
+                    lines.append(f"  • *План:* _{loan.notes}_")
+            else:
+                lines.extend([
+                    f"  • *Lender:* *{loan.lender_name}* {f'(Contract #{loan.contract_number})' if loan.contract_number else ''}",
+                    f"  • *Current Principal:* `{cur}{loan.principal_balance:,.2f}` at `{loan.apr_percent:.2f}% APR`",
+                    f"  • *1️⃣ Regular Payment:* `{cur}{loan.regular_payment:,.2f}`",
+                    f"  • *2️⃣ Extra Principal Prepayment:* `{cur}{loan.early_principal_payment:,.2f}` (+ fee `{cur}{fee_eur:.2f}`)",
+                    f"  • *Total Monthly Debt Outflow:* `{cur}{monthly_loan_total:,.2f}` _(guaranteed {loan.apr_percent:.2f}% return!)_",
+                    f"  • *Est. Remaining Principal:* `~{cur}{new_principal_est:,.2f}`",
+                ])
+                if loan.notes:
+                    lines.append(f"  • *Plan:* _{loan.notes}_")
     else:
-        lines.append("  • ✅ Нямаш въведени активни кредити! _(Ако имаш кредит с висока лихва над 10–12% ГПР, можеш да го добавиш с_ `/set_loan`_)._")
+        lines.append(
+            "  • ✅ Нямаш въведени активни кредити! _(Добави кредит >10% ГПР с_ `/set_loan`_)._"
+            if is_bg
+            else "  • ✅ No active loans recorded! _(Track any high-interest loan >10% APR with_ `/set_loan`_)._"
+        )
 
-    # Section 4: 📈 Динамичен план за инвестиция (изчислен на живо от пайовете и Watchlist-а!)
-    lines.extend(["", "📈 *4. ДИНАМИЧЕН ПЛАН ЗА ИНВЕСТИЦИЯ ДНЕС*"])
-    dynamic_lines = build_dynamic_investment_plan_lines(session, user, latest_snap)
-    for dl in dynamic_lines:
+    # Section 4: Dynamic Investment Plan
+    lines.extend(["", "📈 *4. ДИНАМИЧЕН ПЛАН ЗА ИНВЕСТИЦИЯ ДНЕС*" if is_bg else "📈 *4. DYNAMIC INVESTMENT PLAN TODAY*"])
+    for dl in build_dynamic_investment_plan_lines(session, user, latest_snap):
         lines.append(f"  • {dl}")
 
-    # Section 5: 🛡️ Проверка на буфера и бюджета
-    lines.extend(["", "🛡️ *5. ПРОВЕРКА НА ЛИКВИДНИЯ БУФЕР И БЮДЖЕТА*"])
+    # Section 5: Liquidity Buffer & Budget
+    lines.extend(["", "🛡️ *5. ПРОВЕРКА НА ЛИКВИДНИЯ БУФЕР И БЮДЖЕТА*" if is_bg else "🛡️ *5. LIQUIDITY BUFFER & BUDGET CHECK*"])
     if user.monthly_income <= 0 and user.monthly_invest_budget <= 0:
-        lines.append("  • _Бюджетът ти е празен. Въведи своите данни с_ `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ БУФЕР` _за автоматичен разчет._")
+        lines.append(
+            "  • _Бюджетът ти е празен. Въведи данните си с_ `/set_budget ДОХОД ИНВЕСТ_БЮДЖЕТ БУФЕР`."
+            if is_bg
+            else "  • _Your budget is blank. Configure it via_ `/set_budget INCOME INVEST_BUDGET BUFFER`."
+        )
     else:
         buf_ok = user.emergency_buffer_current >= user.emergency_buffer_target
-        buf_icon = "✅" if buf_ok else f"⚠️ Липсват `{cur}{user.emergency_buffer_target - user.emergency_buffer_current:,.2f}` — изгради го приоритетно!"
         remaining_for_living = round(user.monthly_income - total_loan_outflow - user.monthly_invest_budget, 2)
-        lines.extend([
-            f"  • *Неприкосновен ликвиден буфер:* `{cur}{user.emergency_buffer_current:,.2f}` / цел `{cur}{user.emergency_buffer_target:,.2f}` {buf_icon}",
-            f"  • *Месечен нетен доход:* `{cur}{user.monthly_income:,.2f}`",
-            f"  • *След кредит (`{cur}{total_loan_outflow:,.2f}`) и бюджет за буфер/инвестиции (`{cur}{user.monthly_invest_budget:,.2f}`):* Остават `{cur}{remaining_for_living:,.2f}` за текущи разходи.",
-        ])
+        if is_bg:
+            buf_icon = "✅" if buf_ok else f"⚠️ Липсват `{cur}{user.emergency_buffer_target - user.emergency_buffer_current:,.2f}` — изгради го приоритетно!"
+            lines.extend([
+                f"  • *Неприкосновен ликвиден буфер:* `{cur}{user.emergency_buffer_current:,.2f}` / цел `{cur}{user.emergency_buffer_target:,.2f}` {buf_icon}",
+                f"  • *Месечен нетен доход:* `{cur}{user.monthly_income:,.2f}`",
+                f"  • *След кредит (`{cur}{total_loan_outflow:,.2f}`) и бюджет за буфер/инвестиции (`{cur}{user.monthly_invest_budget:,.2f}`):* Остават `{cur}{remaining_for_living:,.2f}` за текущи разходи.",
+            ])
+        else:
+            buf_icon = "✅" if buf_ok else f"⚠️ Missing `{cur}{user.emergency_buffer_target - user.emergency_buffer_current:,.2f}` — prioritize building it!"
+            lines.extend([
+                f"  • *Emergency Liquidity Buffer:* `{cur}{user.emergency_buffer_current:,.2f}` / target `{cur}{user.emergency_buffer_target:,.2f}` {buf_icon}",
+                f"  • *Monthly Net Income:* `{cur}{user.monthly_income:,.2f}`",
+                f"  • *After debt (`{cur}{total_loan_outflow:,.2f}`) & invest/buffer budget (`{cur}{user.monthly_invest_budget:,.2f}`):* `{cur}{remaining_for_living:,.2f}` left for living expenses.",
+            ])
 
     return "\n".join(lines)

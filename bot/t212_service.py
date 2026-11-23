@@ -267,32 +267,52 @@ def sync_user_portfolio(session: Session, user: User) -> PortfolioSnapshot:
     return save_snapshot_from_raw(session, user, raw_data)
 
 
-def format_portfolio_telegram(snap: PortfolioSnapshot, currency: str = "€") -> str:
-    """Format a PortfolioSnapshot into a rich Bulgarian Telegram report."""
+def format_portfolio_telegram(snap: PortfolioSnapshot, currency: str = "€", lang: str = "en") -> str:
+    """Format a PortfolioSnapshot into a rich English (default) or Bulgarian Telegram report."""
     raw = json.loads(snap.raw_json) if snap.raw_json else {}
     parsed = parse_t212_snapshot(raw) if raw else None
+    is_bg = lang == "bg"
 
     ppl_sign = "+" if snap.unrealized_ppl >= 0 else ""
     real_sign = "+" if snap.realized_result >= 0 else ""
-    semi_status = (
-        "⚠️ Над лимита (20-25%)"
-        if snap.semiconductor_pct > 25.0
-        else ("⚡ На горната граница (20-25%)" if snap.semiconductor_pct >= 20.0 else "✅ В норма (<20%)")
-    )
-
-    lines = [
-        "📊 *ТВОЯТ TRADING 212 ПОРТФЕЙЛ*",
-        f"🕒 _Обновен: {snap.created_at.strftime('%d.%m.%Y %H:%M UTC')}_",
-        "",
-        f"💰 *Обща стойност:* `{currency}{snap.total_value:,.2f}`",
-        f"📈 *Инвестирани позиции:* `{currency}{snap.invested_value:,.2f}` ({snap.positions_count} актива)",
-        f"🥧 *Кеш в пайове (Pending):* `{currency}{snap.pie_cash:,.2f}`",
-        f"💵 *Свободен кеш:* `{currency}{snap.free_cash:,.2f}`",
-        f"📉 *Текущ нереализиран P&L:* `{ppl_sign}{currency}{snap.unrealized_ppl:,.2f}`",
-        f"🏆 *Реализирана печалба + дивиденти:* `{real_sign}{currency}{snap.realized_result:,.2f}`",
-        "",
-        f"🔬 *Сектор Полупроводници:* `{snap.semiconductor_pct:.2f}%` — {semi_status}",
-    ]
+    if is_bg:
+        semi_status = (
+            "⚠️ Над лимита (20-25%)"
+            if snap.semiconductor_pct > 25.0
+            else ("⚡ На горната граница (20-25%)" if snap.semiconductor_pct >= 20.0 else "✅ В норма (<20%)")
+        )
+        lines = [
+            "📊 *ТВОЯТ TRADING 212 ПОРТФЕЙЛ*",
+            f"🕒 _Обновен: {snap.created_at.strftime('%d.%m.%Y %H:%M UTC')}_",
+            "",
+            f"💰 *Обща стойност:* `{currency}{snap.total_value:,.2f}`",
+            f"📈 *Инвестирани позиции:* `{currency}{snap.invested_value:,.2f}` ({snap.positions_count} актива)",
+            f"🥧 *Кеш в пайове (Pending):* `{currency}{snap.pie_cash:,.2f}`",
+            f"💵 *Свободен кеш:* `{currency}{snap.free_cash:,.2f}`",
+            f"📉 *Текущ нереализиран P&L:* `{ppl_sign}{currency}{snap.unrealized_ppl:,.2f}`",
+            f"🏆 *Реализирана печалба + дивиденти:* `{real_sign}{currency}{snap.realized_result:,.2f}`",
+            "",
+            f"🔬 *Сектор Полупроводници:* `{snap.semiconductor_pct:.2f}%` — {semi_status}",
+        ]
+    else:
+        semi_status = (
+            "⚠️ Above cap (20-25%)"
+            if snap.semiconductor_pct > 25.0
+            else ("⚡ Near upper limit (20-25%)" if snap.semiconductor_pct >= 20.0 else "✅ Healthy (<20%)")
+        )
+        lines = [
+            "📊 *YOUR TRADING 212 PORTFOLIO*",
+            f"🕒 _Updated: {snap.created_at.strftime('%Y-%m-%d %H:%M UTC')}_",
+            "",
+            f"💰 *Total Value:* `{currency}{snap.total_value:,.2f}`",
+            f"📈 *Invested Positions:* `{currency}{snap.invested_value:,.2f}` ({snap.positions_count} assets)",
+            f"🥧 *Cash in Pies (Pending):* `{currency}{snap.pie_cash:,.2f}`",
+            f"💵 *Free Cash:* `{currency}{snap.free_cash:,.2f}`",
+            f"📉 *Unrealized P&L:* `{ppl_sign}{currency}{snap.unrealized_ppl:,.2f}`",
+            f"🏆 *Realized P&L + Dividends:* `{real_sign}{currency}{snap.realized_result:,.2f}`",
+            "",
+            f"🔬 *Semiconductor Exposure:* `{snap.semiconductor_pct:.2f}%` — {semi_status}",
+        ]
 
     if parsed:
         semi_bd = parsed.get("semiconductor_breakdown") or {}
@@ -300,12 +320,15 @@ def format_portfolio_telegram(snap: PortfolioSnapshot, currency: str = "€") ->
             bd_str = ", ".join(f"{k}: {currency}{v:,.2f}" for k, v in semi_bd.items())
             lines.append(f"   └ _({bd_str})_")
 
+        cash_lbl = "Кеш" if is_bg else "Cash"
+        wt_lbl = "Дял" if is_bg else "Wt"
+        tgt_lbl = "цел" if is_bg else "tgt"
         for pie in parsed.get("pies") or []:
             lines.append("")
             p_sign = "+" if pie["ppl"] >= 0 else ""
             lines.append(
                 f"🥧 *{pie['name']}* — `{currency}{pie['value']:,.2f}` "
-                f"(`{p_sign}{currency}{pie['ppl']:,.2f}`) | Кеш: `{currency}{pie['cash']:,.2f}`"
+                f"(`{p_sign}{currency}{pie['ppl']:,.2f}`) | {cash_lbl}: `{currency}{pie['cash']:,.2f}`"
             )
             sorted_inst = sorted(pie["instruments"], key=lambda x: x["value"], reverse=True)
             for inst in sorted_inst:
@@ -314,14 +337,17 @@ def format_portfolio_telegram(snap: PortfolioSnapshot, currency: str = "€") ->
                 dev_str = f"+{dev}%" if dev > 0 else f"{dev}%"
                 lines.append(
                     f"  • `{inst['ticker']:<5}` {currency}{inst['value']:>6.2f} "
-                    f"({i_sign}{currency}{inst['ppl']:.2f}) | Дял: {inst['current_pct']:.1f}%/цел {inst['expected_pct']:.0f}% ({dev_str})"
+                    f"({i_sign}{currency}{inst['ppl']:.2f}) | {wt_lbl}: {inst['current_pct']:.1f}%/{tgt_lbl} {inst['expected_pct']:.0f}% ({dev_str})"
                 )
 
         orders = parsed.get("pending_orders") or []
         if orders:
             lines.append("")
-            lines.append(f"⏳ *Чакащи поръчки ({len(orders)} бр.):*")
+            lines.append(
+                f"⏳ *Чакащи поръчки ({len(orders)} бр.):*" if is_bg else f"⏳ *Pending Orders ({len(orders)}):*"
+            )
             for o in orders:
-                lines.append(f"  • `{o['side']}` *{o['ticker']}* за `{currency}{o['value']:.2f}` ({o['status']})")
+                prep = "за" if is_bg else "for"
+                lines.append(f"  • `{o['side']}` *{o['ticker']}* {prep} `{currency}{o['value']:.2f}` ({o['status']})")
 
     return "\n".join(lines)

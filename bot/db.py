@@ -54,13 +54,16 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 
 def _ensure_column_migrations() -> None:
-    """Idempotently add newly introduced columns to existing SQLite / MSSQL tables."""
+    """Idempotently add newly introduced columns to existing SQLite / PostgreSQL / MSSQL tables."""
     inspector = inspect(engine)
     if "users" in inspector.get_table_names():
         existing_cols = {c["name"].lower() for c in inspector.get_columns("users")}
-        if "gemini_api_key_enc" not in existing_cols:
-            with engine.begin() as conn:
+        with engine.begin() as conn:
+            if "gemini_api_key_enc" not in existing_cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN gemini_api_key_enc VARCHAR(512)"))
+            if "language" not in existing_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN language VARCHAR(8) DEFAULT 'en'"))
+                conn.execute(text("UPDATE users SET language = 'en' WHERE language IS NULL"))
 
 
 def init_db() -> str:
