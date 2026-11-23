@@ -1502,15 +1502,16 @@ async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
                 session.commit()
 
             db_user = session.query(User).filter(User.id == user.id).first()
-            report = await asyncio.to_thread(
-                analyze_stock_with_buffett,
-                metrics,
-                watch_item,
-                db_user,
-                latest_snap,
-                session,
-                deep_metrics,
-            )
+
+        report = await asyncio.to_thread(
+            analyze_stock_with_buffett,
+            metrics,
+            watch_item,
+            db_user,
+            latest_snap,
+            None,
+            deep_metrics,
+        )
         kb = InlineKeyboardMarkup(
             [
                 [
@@ -2096,7 +2097,7 @@ def main() -> None:
         print("⚠️ Missing TELEGRAM_BOT_TOKEN in .env / Environment Variables!")
         return
 
-    app = Application.builder().token(token).post_init(post_init_setup).build()
+    app = Application.builder().token(token).concurrent_updates(True).post_init(post_init_setup).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

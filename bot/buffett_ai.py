@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import time
 from pathlib import Path
 from sqlalchemy.orm import Session
 from bot.crypto import decrypt_secret
@@ -104,11 +105,47 @@ def load_buffett_system_instruction(include_references: bool = False, lang: str 
     return CORE_BUFFETT_SYSTEM_PROMPT_BG if lang == "bg" else CORE_BUFFETT_SYSTEM_PROMPT_EN
 
 
-def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: str) -> str:
-    """Call Gemini Interactions API with a fast Free-Tier friendly model cascade (no 100s hang on 429)."""
-    from google import genai
+def _format_friendly_ai_error(err: Exception, is_bg: bool) -> str:
+    """Turn verbose Gemini SDK/HTTP errors into a crisp 1-line user-friendly notice."""
+    raw = str(err)
+    low = raw.lower()
+    if "503" in low or "unavailable" in low or "high demand" in low or "overloaded" in low:
+        return (
+            "Gemini AI сървърите са временно претоварени (503) — опитай след минута."
+            if is_bg
+            else "Gemini AI is experiencing a temporary spike in demand (503) — try again in a minute."
+        )
+    if "429" in low or "resource_exhausted" in low or "quota" in low:
+        return (
+            "Временният безплатен лимит на Gemini е достигнат (429) — опитай след минута."
+            if is_bg
+            else "Gemini free-tier rate limit reached (429) — please try again in a minute."
+        )
+    if "timeout" in low or "timed out" in low:
+        return (
+            "Gemini AI не отговори навреме (timeout)."
+            if is_bg
+            else "Gemini AI request timed out."
+        )
+    clean = " ".join(raw.split())
+    return clean[:140] + ("…" if len(clean) > 140 else "")
 
-    client = genai.Client(api_key=api_key)
+
+def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: str) -> str:
+    """Call Gemini Interactions API with fast-fail (no 160s 503 backoff) & Free-Tier model cascade."""
+    from google import genai
+    from google.genai import types as genai_types
+
+    # Disable internal multi-minute 503 retry loops (attempts=1 -> max_retries=0)
+    # and cap each attempt at 14s so the bot fails over instantly to the next model.
+    http_opts_kwargs: dict = {"timeout": 14000}
+    retry_cls = getattr(genai_types, "HttpRetryOptions", None)
+    if retry_cls is not None:
+        http_opts_kwargs["retry_options"] = retry_cls(attempts=1)
+    client = genai.Client(
+        api_key=api_key,
+        http_options=genai_types.HttpOptions(**http_opts_kwargs),
+    )
     use_search = os.environ.get("GEMINI_ENABLE_SEARCH", "").strip() == "1"
     cascade: list[tuple[str, bool]] = []
     if use_search:
@@ -119,13 +156,18 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
         ("gemini-3.1-flash-lite", False),
     ])
 
+    deadline = time.monotonic() + 26.0
     last_err: Exception | None = None
     for model_name, enable_search in cascade:
+        remaining = deadline - time.monotonic()
+        if remaining < 3.0:
+            break
         try:
             kwargs = {
                 "model": model_name,
                 "system_instruction": system_instruction,
                 "input": prompt,
+                "timeout": min(14.0, remaining),
             }
             if enable_search:
                 kwargs["tools"] = [{"type": "google_search"}]
@@ -1357,10 +1399,11 @@ def analyze_stock_with_buffett(
                     ai_text,
                 ])
         except Exception as e:
+            friendly = _format_friendly_ai_error(e, is_bg)
             header_lines.append(
-                f"\n_(Бележка: AI коментарът не беше зареден: {e})_"
+                f"\n_(ℹ️ {friendly} Пълният 4-годишен одит по Бъфет е показан горе.)_"
                 if is_bg
-                else f"\n_(Note: AI commentary unavailable: {e})_"
+                else f"\n_(ℹ️ {friendly} Full multi-year Buffett audit shown above.)_"
             )
 
     return "\n".join(header_lines)
@@ -1502,10 +1545,11 @@ def ask_buffett_agent(
                 title = "🤖 *БЪФЕТ & МЪНГЪР АГЕНТ:*" if is_bg else "🤖 *BUFFETT & MUNGER AGENT:*"
                 return f"{title}\n\n{ai_text}"
         except Exception as e:
+            friendly = _format_friendly_ai_error(e, is_bg)
             fallback_note = (
-                f"_(AI връзката върна грешка: {e} — показвам живия количествен разчет по Бъфет)_\n\n"
+                f"_(ℹ️ {friendly} Показвам живия количествен разчет по Бъфет.)_\n\n"
                 if is_bg
-                else f"_(AI request failed: {e} — showing live quantitative Buffett calculation)_\n\n"
+                else f"_(ℹ️ {friendly} Showing live quantitative Buffett breakdown.)_\n\n"
             )
     else:
         fallback_note = (
