@@ -4,11 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
+import re
 from pathlib import Path
 from sqlalchemy.orm import Session
 from bot.crypto import decrypt_secret
 from bot.i18n import format_ordinal, get_lang, localize_moat
-from bot.market_service import fetch_stock_fundamentals
+from bot.market_service import fetch_deep_historical_metrics, fetch_stock_fundamentals
 from bot.models import PortfolioSnapshot, User, UserLoan, WatchlistItem
 from bot.t212_service import SEMICONDUCTOR_SHORT_TICKERS, parse_t212_snapshot
 
@@ -52,8 +53,27 @@ def format_bg_ordinal(day: int) -> str:
     return format_ordinal(day, "bg")
 
 
+def _is_owner_or_whitelisted(user: User | None) -> bool:
+    """Check if user is the bot owner or explicitly listed in GEMINI_ALLOWED_IDS."""
+    if not user:
+        return False
+    owner_tg_id = int(os.environ.get("OWNER_TELEGRAM_ID") or 0)
+    if (owner_tg_id and user.telegram_id == owner_tg_id) or user.id == 1:
+        return True
+    allowed_raw = os.environ.get("GEMINI_ALLOWED_IDS", "").strip()
+    if allowed_raw:
+        allowed = {x.strip() for x in allowed_raw.split(",") if x.strip()}
+        if str(user.telegram_id) in allowed:
+            return True
+    return False
+
+
 def _get_gemini_api_key(user: User | None = None, session: Session | None = None) -> str:
-    """Resolve Gemini API key: 1) User's encrypted key (/set_gemini_key), 2) Server .env, 3) Owner's shared key in DB."""
+    """Resolve Gemini API key with STRICT tenant isolation (owner's key is NEVER shared with public users).
+
+    1) User's own encrypted key saved via /set_gemini_key.
+    2) Server GEMINI_API_KEY env var ONLY for the bot owner (or GEMINI_ALLOWED_IDS whitelist).
+    """
     if user and getattr(user, "gemini_api_key_enc", None):
         try:
             k = decrypt_secret(user.gemini_api_key_enc).strip()
@@ -61,6 +81,9 @@ def _get_gemini_api_key(user: User | None = None, session: Session | None = None
                 return k
         except Exception:
             pass
+
+    if not _is_owner_or_whitelisted(user):
+        return ""
 
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not gemini_key:
@@ -73,16 +96,6 @@ def _get_gemini_api_key(user: User | None = None, session: Session | None = None
                     break
     if gemini_key and gemini_key != "YOUR_GEMINI_API_KEY_HERE":
         return gemini_key
-
-    if session is not None:
-        owner = session.query(User).order_by(User.id.asc()).first()
-        if owner and getattr(owner, "gemini_api_key_enc", None):
-            try:
-                k = decrypt_secret(owner.gemini_api_key_enc).strip()
-                if k and k != "YOUR_GEMINI_API_KEY_HERE":
-                    return k
-            except Exception:
-                pass
     return ""
 
 
@@ -1047,14 +1060,183 @@ def build_dynamic_investment_plan_lines(
     return lines
 
 
+def format_deep_audit_lines(deep: dict | None, sym: str, lang: str = "en") -> list[str]:
+    """Render the v1.1.0 Multi-Year Historical Audit & Red-Flag Detector block in EN or BG."""
+    if not deep or not deep.get("hist_years"):
+        return []
+    is_bg = lang == "bg"
+    yrs = deep["hist_years"]
+    lines = [
+        "",
+        f"🔬 *2. Дълбок {yrs}-годишен исторически одит & Детектор за капани:*"
+        if is_bg
+        else f"🔬 *2. Deep {yrs}-Year Historical Audit & Red-Flag Detector:*",
+    ]
+
+    if deep.get("is_bank_or_insurer"):
+        if deep.get("avg_roe_pct") is not None:
+            icon = "✅" if deep["avg_roe_pct"] >= 15.0 else "⚠️"
+            lines.append(
+                f"  {icon} *{yrs}-г. среден ROE (банков тест):* `{deep['avg_roe_pct']:.1f}%`"
+                if is_bg
+                else f"  {icon} *{yrs}-Yr Avg ROE (Bank Playbook):* `{deep['avg_roe_pct']:.1f}%`"
+            )
+    else:
+        if deep.get("avg_roic_pct") is not None:
+            icon = "✅" if deep["avg_roic_pct"] >= 15.0 else "⚠️"
+            min_s = f" (мин: `{deep['min_roic_pct']:.1f}%`)" if (deep.get("min_roic_pct") is not None and is_bg) else (
+                f" (min: `{deep['min_roic_pct']:.1f}%`)" if deep.get("min_roic_pct") is not None else ""
+            )
+            lines.append(
+                f"  {icon} *{yrs}-г. среден ROIC:* `{deep['avg_roic_pct']:.1f}%`{min_s}"
+                if is_bg
+                else f"  {icon} *{yrs}-Yr Avg ROIC:* `{deep['avg_roic_pct']:.1f}%`{min_s}"
+            )
+        if deep.get("true_owner_earnings") is not None:
+            toe_b = deep["true_owner_earnings"] / 1e9
+            sbc_b = (deep.get("latest_sbc") or 0.0) / 1e9
+            sbc_pct = deep.get("sbc_pct_of_ocf")
+            sbc_tag = f" | SBC: `{sym}{sbc_b:.2f}B` (`{sbc_pct:.0f}%` OCF)" if sbc_pct is not None else ""
+            y_tag = f" (Yield: `{deep['true_oe_yield_pct']:.2f}%`)" if deep.get("true_oe_yield_pct") is not None else ""
+            lines.append(
+                f"  💵 *Истински Owner Earnings (след SBC):* `{sym}{toe_b:,.2f}B`{y_tag}{sbc_tag}"
+                if is_bg
+                else f"  💵 *True Owner Earnings (after SBC):* `{sym}{toe_b:,.2f}B`{y_tag}{sbc_tag}"
+            )
+
+    if deep.get("rev_cagr_pct") is not None:
+        cagr_icon = "✅" if deep["rev_cagr_pct"] >= 5.0 else ("🟡" if deep["rev_cagr_pct"] >= 0 else "⚠️")
+        lines.append(
+            f"  {cagr_icon} *Ръст на приходите (CAGR):* `{deep['rev_cagr_pct']:+.1f}%/год.`"
+            if is_bg
+            else f"  {cagr_icon} *Revenue CAGR:* `{deep['rev_cagr_pct']:+.1f}%/yr`"
+        )
+
+    if deep.get("share_change_pct") is not None:
+        sc = deep["share_change_pct"]
+        sy = deep.get("share_years") or yrs
+        if sc <= -2.0:
+            lines.append(
+                f"  ✅ *Обратно изкупуване (Buybacks):* `{sc:+.1f}%` акции за {sy} г. (в полза на акционерите)"
+                if is_bg
+                else f"  ✅ *Share Buybacks:* `{sc:+.1f}%` share count over {sy} yrs (shareholder-friendly)"
+            )
+        elif sc >= 3.0:
+            lines.append(
+                f"  ⚠️ *Разводняване (Dilution):* `{sc:+.1f}%` повече акции за {sy} г."
+                if is_bg
+                else f"  ⚠️ *Share Dilution:* `{sc:+.1f}%` more shares over {sy} yrs"
+            )
+        else:
+            lines.append(
+                f"  ℹ️ *Брой акции ({sy} г.):* Стабилен (`{sc:+.1f}%`)"
+                if is_bg
+                else f"  ℹ️ *Share Count ({sy} yrs):* Stable (`{sc:+.1f}%`)"
+            )
+
+    if not deep.get("is_bank_or_insurer"):
+        ic = deep.get("interest_coverage_x")
+        if ic is not None:
+            if ic >= 100.0:
+                lines.append(
+                    "  ✅ *Покритие на лихвите (EBIT/Interest):* `100x+` (Крепостен баланс)"
+                    if is_bg
+                    else "  ✅ *Interest Coverage (EBIT/Interest):* `100x+` (Fortress)"
+                )
+            elif ic >= 5.0:
+                lines.append(
+                    f"  ✅ *Покритие на лихвите:* `{ic:.1f}x` (> 5.0x)"
+                    if is_bg
+                    else f"  ✅ *Interest Coverage:* `{ic:.1f}x` (> 5.0x)"
+                )
+            else:
+                lines.append(
+                    f"  ⚠️ *Покритие на лихвите:* `{ic:.1f}x` (< 5.0x — повишен риск)"
+                    if is_bg
+                    else f"  ⚠️ *Interest Coverage:* `{ic:.1f}x` (< 5.0x — tight)"
+                )
+
+        stp = deep.get("stress_test_pass")
+        sm = deep.get("stress_ebit_margin_pct")
+        if stp is True:
+            lines.append(
+                f"  ✅ *Стрес тест (−30% приходи):* Издържа комфортно (стрес EBIT марж `~{sm:.1f}%`)"
+                if is_bg
+                else f"  ✅ *Recession Stress Test (−30% Revenue):* Passes comfortably (stressed EBIT margin `~{sm:.1f}%`)"
+            )
+        elif stp is False:
+            lines.append(
+                f"  🚩 *Стрес тест (−30% приходи):* Уязвима (стрес EBIT марж `{sm:.1f}%`)"
+                if is_bg
+                else f"  🚩 *Recession Stress Test (−30% Revenue):* Vulnerable (stressed EBIT margin `{sm:.1f}%`)"
+            )
+
+    flags = deep.get("red_flags") or []
+    if flags:
+        flag_texts = []
+        for f in flags:
+            code, val = f["code"], f["val"]
+            if code == "sbc_heavy":
+                flag_texts.append(
+                    f"🚩 Тежък SBC (`{val:.0f}%` от OCF изяжда печалбата на акционерите)"
+                    if is_bg
+                    else f"🚩 Heavy SBC Dilution (`{val:.0f}%` of OCF erodes Owner Earnings)"
+                )
+            elif code == "accounting_gain":
+                flag_texts.append(
+                    f"🚩 Счетоводна аномалия (Net Income е `{val:.0f}%` от OCF — възможна еднократна печалба)"
+                    if is_bg
+                    else f"🚩 Earnings Quality Alert (Net Income is `{val:.0f}%` of OCF — possible one-time gain)"
+                )
+            elif code == "dilution":
+                flag_texts.append(
+                    f"🚩 Силно разводняване на акционерите (`+{val:.1f}%` нови акции)"
+                    if is_bg
+                    else f"🚩 Heavy Share Dilution (`+{val:.1f}%` share count growth)"
+                )
+            elif code == "margin_erosion":
+                flag_texts.append(
+                    f"🚩 Свиване на оперативния марж (`{val:+.1f}%` спрямо средния — провери рова!)"
+                    if is_bg
+                    else f"🚩 Margin Erosion (`{val:+.1f} pts` below multi-yr avg — check moat!)"
+                )
+            elif code == "rev_decline":
+                flag_texts.append(
+                    f"🚩 Спад на приходите YoY (`{val:+.1f}%`)"
+                    if is_bg
+                    else f"🚩 Revenue Decline YoY (`{val:+.1f}%`)"
+                )
+            elif code == "stress_fail":
+                flag_texts.append(
+                    "🚩 Не издържа рецесионния стрес тест при −30% приходи"
+                    if is_bg
+                    else "🚩 Fails Buffett's −30% revenue recession stress test"
+                )
+            elif code == "low_interest_cov":
+                flag_texts.append(
+                    f"🚩 Ниско покритие на лихвите (`{val:.1f}x` < 5x)"
+                    if is_bg
+                    else f"🚩 Low Interest Coverage (`{val:.1f}x` < 5x)"
+                )
+        lines.extend([f"  {ft}" for ft in flag_texts])
+    else:
+        lines.append(
+            "  🛡️ *Детектор за капани:* ✅ Няма открити счетоводни или SBC червени флагове!"
+            if is_bg
+            else "  🛡️ *Red-Flag Detector:* ✅ Zero accounting, SBC, or dilution red flags detected!"
+        )
+    return lines
+
+
 def analyze_stock_with_buffett(
     metrics: dict,
     watch_item: WatchlistItem | None = None,
     user: User | None = None,
     latest_snap: PortfolioSnapshot | None = None,
     session: Session | None = None,
+    deep_metrics: dict | None = None,
 ) -> str:
-    """Produce a full English (default) or Bulgarian Buffett & Munger stock report."""
+    """Produce a full English (default) or Bulgarian Buffett & Munger stock report with multi-year deep audit."""
     lang = get_lang(user)
     is_bg = lang == "bg"
     cur = metrics.get("currency", "USD")
@@ -1096,6 +1278,12 @@ def analyze_stock_with_buffett(
             f"  • *Net Debt:* `{sym}{nd_b:,.2f}B` (Net Debt/EBITDA: `{nd_ebitda_s}`)",
         ]
 
+    # Section 2 (v1.1.0): Deep Multi-Year Historical Audit & Red-Flag Detector
+    deep_lines = format_deep_audit_lines(deep_metrics, sym, lang)
+    header_lines.extend(deep_lines)
+    sec_val_num = 3 if deep_lines else 2
+    sec_ai_num = 4 if deep_lines else 3
+
     moat_text = localize_moat(metrics["ticker"], watch_item.moat_summary if watch_item else None, lang)
     if moat_text and moat_text not in ("Wide Economic Moat", "Широк конкурентен ров"):
         header_lines.extend([
@@ -1106,7 +1294,7 @@ def analyze_stock_with_buffett(
     if is_bg:
         header_lines.extend([
             "",
-            "⚖️ *2. Бърз филтър на Бъфет & Оценка на Вътрешната стойност:*",
+            f"⚖️ *{sec_val_num}. Бърз филтър на Бъфет & Оценка на Вътрешната стойност:*",
             *[f"  {c}" for c in score["checks"]],
             "",
             f"🎯 *Вътрешна стойност (Intrinsic Value):* `{sym}{score['iv_low']:,.2f} – {sym}{score['iv_high']:,.2f}`",
@@ -1118,7 +1306,7 @@ def analyze_stock_with_buffett(
     else:
         header_lines.extend([
             "",
-            "⚖️ *2. Buffett Quick Filter & Intrinsic Valuation:*",
+            f"⚖️ *{sec_val_num}. Buffett Quick Filter & Intrinsic Valuation:*",
             *[f"  {c}" for c in score["checks"]],
             "",
             f"🎯 *Intrinsic Value Range:* `{sym}{score['iv_low']:,.2f} – {sym}{score['iv_high']:,.2f}`",
@@ -1134,21 +1322,26 @@ def analyze_stock_with_buffett(
                 portfolio_ctx = (
                     f"User portfolio: €{latest_snap.total_value:.0f}, semiconductors {latest_snap.semiconductor_pct:.1f}% (cap 20-25%)."
                 )
+            deep_ctx = (
+                f"\nMulti-year historical audit: {json.dumps(deep_metrics, ensure_ascii=False, separators=(',', ':'))}"
+                if deep_metrics
+                else ""
+            )
             if is_bg:
                 prompt = (
                     f"Анализирай {metrics['ticker']} ({metrics['name']}) по Бъфет и Мънгър.\n"
-                    f"Данни: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"TTM данни: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}\n"
                     f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
-                    "Дай стегнато обобщение в 4 точки (до 1100 знака): 1) Вид и посока на рова; 2) Мениджмънт ($1 тест); "
-                    "3) Инверсия на Мънгър (Топ 2 риска); 4) Кога да продадем (4-те критерия)."
+                    "Дай стегнато обобщение в 4 точки (до 1100 знака), коментирайки и реалния многогодишен ROIC, SBC/buybacks и червените флагове:\n"
+                    "1) Вид и посока на рова; 2) Мениджмънт ($1 тест, SBC и buybacks); 3) Инверсия на Мънгър (Топ 2 риска); 4) Кога да продадем (4-те критерия)."
                 )
             else:
                 prompt = (
                     f"Analyze {metrics['ticker']} ({metrics['name']}) using Buffett & Munger's framework.\n"
-                    f"Metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"TTM metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}\n"
                     f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
-                    "Write a crisp 4-part summary (under 1100 chars): 1) Moat type & direction; 2) Management & capital allocation ($1 test); "
-                    "3) Munger's Inversion (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
+                    "Write a crisp 4-part summary (under 1100 chars), incorporating multi-year ROIC, SBC/buybacks, stress test & any red flags:\n"
+                    "1) Moat type & direction; 2) Management ($1 test, SBC & buybacks); 3) Munger's Inversion (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
                 )
             ai_text = _call_gemini_with_fallback(
                 gemini_key,
@@ -1158,9 +1351,9 @@ def analyze_stock_with_buffett(
             if ai_text:
                 header_lines.extend([
                     "",
-                    "🤖 *3. Задълбочен AI Анализ (Бъфет & Мънгър Агент):*"
+                    f"🤖 *{sec_ai_num}. Задълбочен AI Анализ (Бъфет & Мънгър Агент):*"
                     if is_bg
-                    else "🤖 *3. Deep AI Analysis (Buffett & Munger Agent):*",
+                    else f"🤖 *{sec_ai_num}. Deep AI Analysis (Buffett & Munger Agent):*",
                     ai_text,
                 ])
         except Exception as e:
@@ -1255,6 +1448,37 @@ def ask_buffett_agent(
                 for x in unified["top3"]
             ]
 
+            # Auto-enrich with multi-year deep historical metrics for up to 2 known tickers mentioned in the question
+            known_tickers = {x["ticker"] for x in unified.get("all_ranked") or []}
+            mentioned = [
+                tok for tok in re.findall(r"\b[A-Z]{2,5}(?:\.[A-Z])?\b", question.upper())
+                if tok in known_tickers
+            ]
+            deep_mentioned: dict[str, dict] = {}
+            for tk in list(dict.fromkeys(mentioned))[:2]:
+                try:
+                    m_tk = fetch_stock_fundamentals(tk)
+                    d_tk = fetch_deep_historical_metrics(tk, m_tk)
+                    if d_tk:
+                        deep_mentioned[tk] = {
+                            "avg_roic_pct": d_tk.get("avg_roic_pct"),
+                            "avg_roe_pct": d_tk.get("avg_roe_pct"),
+                            "true_oe_b": round(d_tk["true_owner_earnings"] / 1e9, 2) if d_tk.get("true_owner_earnings") is not None else None,
+                            "sbc_pct_ocf": d_tk.get("sbc_pct_of_ocf"),
+                            "share_chg_pct": d_tk.get("share_change_pct"),
+                            "int_cov_x": d_tk.get("interest_coverage_x"),
+                            "stress_pass": d_tk.get("stress_test_pass"),
+                            "red_flags": d_tk.get("red_flags"),
+                        }
+                except Exception:
+                    pass
+
+            deep_block = (
+                f"Multi-year deep audit for mentioned tickers: {json.dumps(deep_mentioned, ensure_ascii=False, separators=(',', ':'))}\n"
+                if deep_mentioned
+                else ""
+            )
+
             full_prompt = (
                 f"User ({user.full_name}) question: {question}\n"
                 f"Profile: income €{user.monthly_income:.0f}, budget €{user.monthly_invest_budget:.0f}, "
@@ -1262,6 +1486,7 @@ def ask_buffett_agent(
                 f"Loans: {json.dumps(loans_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"T212 Portfolio: {json.dumps(port_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"Unified Top 3 (Watchlist vs Portfolio): {json.dumps(unified_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"{deep_block}"
                 + (
                     "Отговори стегнато за Telegram на български (до 2400 знака), с конкретни числа и ясен избор дали да подсили позиция в портфейла или да добави нова от Watchlist."
                     if is_bg

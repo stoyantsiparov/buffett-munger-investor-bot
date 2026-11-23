@@ -42,7 +42,7 @@ from bot.buffett_ai import (
 from bot.crypto import encrypt_secret
 from bot.db import get_session, init_db
 from bot.i18n import format_ordinal, get_lang, localize_moat
-from bot.market_service import check_watchlist_alerts, fetch_stock_fundamentals
+from bot.market_service import check_watchlist_alerts, fetch_deep_historical_metrics, fetch_stock_fundamentals
 from bot.models import PortfolioSnapshot, User, UserLoan, WatchlistItem
 from bot.seed_owner import seed_default_watchlist_for_user, seed_owner_profile
 from bot.t212_service import (
@@ -814,23 +814,19 @@ async def cmd_set_gemini_key(update: Update, context: ContextTypes.DEFAULT_TYPE)
         db_user = session.query(User).filter(User.id == user.id).first()
         db_user.gemini_api_key_enc = encrypt_secret(raw_key)
         session.commit()
-        owner = session.query(User).order_by(User.id.asc()).first()
-        is_owner = owner is not None and owner.id == db_user.id
 
     if is_bg:
-        shared_note = (
-            "\n🤝 _Като собственик на бота, този ключ активира AI Агента и за приятелите ти!_"
-            if is_owner
-            else "\n🔒 _Ключът е криптиран и се ползва единствено за твоя профил._"
+        msg = (
+            "✅ *Gemini AI API ключът е запазен и криптиран!*\n"
+            "_(Съобщението с ключа беше изтрито от чата.)_\n"
+            "🔒 _Ключът се използва **единствено за твоя личен акаунт** и никога не се споделя с други потребители._"
         )
-        msg = f"✅ *Gemini AI API ключът е запазен и криптиран!*\n_(Съобщението с ключа беше изтрито от чата.)_{shared_note}"
     else:
-        shared_note = (
-            "\n🤝 _As the bot owner, this key also powers the AI Agent for your group!_"
-            if is_owner
-            else "\n🔒 _Encrypted and used exclusively for your profile._"
+        msg = (
+            "✅ *Gemini AI API key saved & encrypted!*\n"
+            "_(Your message containing the key was deleted from chat.)_\n"
+            "🔒 _This key is strictly private to **your own account** and is never shared with other users._"
         )
-        msg = f"✅ *Gemini AI API key saved & encrypted!*\n_(Your message containing the key was deleted from chat.)_{shared_note}"
     await safe_send(context.bot, update.effective_chat.id, msg)
 
 
@@ -1487,6 +1483,7 @@ async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
     )
     try:
         metrics = await asyncio.to_thread(fetch_stock_fundamentals, ticker)
+        deep_metrics = await asyncio.to_thread(fetch_deep_historical_metrics, ticker, metrics)
         with get_session() as session:
             master_id = get_master_watchlist_owner_id(session)
             watch_item = (
@@ -1512,6 +1509,7 @@ async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
                 db_user,
                 latest_snap,
                 session,
+                deep_metrics,
             )
         kb = InlineKeyboardMarkup(
             [

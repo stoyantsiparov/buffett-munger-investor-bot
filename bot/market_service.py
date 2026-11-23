@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import math
 import yfinance as yf
 from sqlalchemy.orm import Session
 from bot.models import WatchlistItem
@@ -106,6 +107,222 @@ def fetch_stock_fundamentals(ticker: str) -> dict:
         "total_cash": float(total_cash),
         "net_debt": float(net_debt),
         "net_debt_to_ebitda": round(net_debt_to_ebitda, 2) if net_debt_to_ebitda is not None else None,
+    }
+
+
+def _df_series(df, candidate_rows: tuple[str, ...]) -> list[tuple[str, float]]:
+    """Extract chronological (newest-first) non-NaN (year, float) pairs from a yfinance DataFrame."""
+    if df is None or getattr(df, "empty", True):
+        return []
+    for row_name in candidate_rows:
+        if row_name in df.index:
+            series = df.loc[row_name]
+            out: list[tuple[str, float]] = []
+            for col, val in series.items():
+                try:
+                    fv = float(val)
+                    if not math.isnan(fv) and not math.isinf(fv):
+                        out.append((str(col)[:4], fv))
+                except Exception:
+                    continue
+            if out:
+                return out
+    return []
+
+
+def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None) -> dict:
+    """Fetch 4-5 year annual GAAP statements from yfinance for true Buffett multi-year ROIC,
+    Owner Earnings after SBC, share count trend, interest coverage, -30% stress test, and red flags."""
+    clean_symbol = ticker.strip().upper()
+    info_m = info_metrics or {}
+    sector = str(info_m.get("sector") or "")
+    industry = str(info_m.get("industry") or "")
+    market_cap = float(info_m.get("market_cap") or 0.0)
+    is_bank_or_insurer = sector == "Financial Services" and any(k in industry for k in ("Bank", "Insurance"))
+
+    try:
+        t = yf.Ticker(clean_symbol)
+        inc = t.income_stmt
+        bs = t.balance_sheet
+        cf = t.cashflow
+    except Exception:
+        return {}
+
+    revs = _df_series(inc, ("Total Revenue", "Operating Revenue"))
+    gross_profits = _df_series(inc, ("Gross Profit",))
+    op_incomes = _df_series(inc, ("Operating Income", "EBIT", "Total Operating Income As Reported"))
+    op_expenses = _df_series(inc, ("Operating Expense",))
+    ebits = _df_series(inc, ("EBIT", "Operating Income"))
+    int_exps = _df_series(inc, ("Interest Expense", "Interest Expense Non Operating"))
+    tax_rates = _df_series(inc, ("Tax Rate For Calcs",))
+    net_incomes = _df_series(inc, ("Net Income", "Net Income Common Stockholders"))
+    dil_shares = _df_series(inc, ("Diluted Average Shares",))
+
+    debts = _df_series(bs, ("Total Debt", "Long Term Debt And Capital Lease Obligation"))
+    equities = _df_series(bs, ("Stockholders Equity", "Common Stock Equity"))
+    cashes = _df_series(bs, ("Cash Cash Equivalents And Short Term Investments", "Cash And Cash Equivalents"))
+    ord_shares = _df_series(bs, ("Ordinary Shares Number", "Share Issued"))
+
+    ocfs = _df_series(cf, ("Operating Cash Flow", "Cash Flow From Continuing Operating Activities"))
+    capexs = _df_series(cf, ("Capital Expenditure", "Capital Expenditure Reported"))
+    das = _df_series(cf, ("Depreciation And Amortization", "Depreciation Amortization Depletion"))
+    sbcs = _df_series(cf, ("Stock Based Compensation",))
+
+    # Build year-indexed maps
+    rev_by_yr = dict(revs)
+    op_by_yr = dict(op_incomes)
+    tax_by_yr = dict(tax_rates)
+    ni_by_yr = dict(net_incomes)
+    debt_by_yr = dict(debts)
+    eq_by_yr = dict(equities)
+    cash_by_yr = dict(cashes)
+
+    # 1. Multi-year ROIC (or ROE for Banks/Insurers)
+    roic_vals: list[float] = []
+    roe_vals: list[float] = []
+    op_margin_vals: list[float] = []
+    years_scanned: list[str] = []
+
+    for yr in sorted(set(ni_by_yr.keys()) | set(op_by_yr.keys()), reverse=True)[:5]:
+        years_scanned.append(yr)
+        eq = eq_by_yr.get(yr, 0.0)
+        ni = ni_by_yr.get(yr)
+        if eq and eq > 0 and ni is not None:
+            roe_vals.append(round((ni / eq) * 100.0, 1))
+
+        rev = rev_by_yr.get(yr, 0.0)
+        op_inc = op_by_yr.get(yr)
+        if rev and rev > 0 and op_inc is not None:
+            op_margin_vals.append(round((op_inc / rev) * 100.0, 1))
+
+        if not is_bank_or_insurer and op_inc is not None and eq > 0:
+            tr = tax_by_yr.get(yr, 0.21)
+            tr = max(0.15, min(0.28, tr if tr > 0 else 0.21))
+            nopat = op_inc * (1.0 - tr)
+            inv_cap = max(0.0, debt_by_yr.get(yr, 0.0) + eq - cash_by_yr.get(yr, 0.0) * 0.8)
+            if inv_cap > 0:
+                roic_vals.append(round((nopat / inv_cap) * 100.0, 1))
+
+    avg_roic_pct = round(sum(roic_vals) / len(roic_vals), 1) if roic_vals else None
+    min_roic_pct = min(roic_vals) if roic_vals else None
+    avg_roe_pct = round(sum(roe_vals) / len(roe_vals), 1) if roe_vals else None
+    hist_years = len(roic_vals) if (not is_bank_or_insurer and roic_vals) else len(roe_vals)
+
+    # 2. True Owner Earnings after Maintenance CapEx AND Stock-Based Compensation (SBC)
+    latest_ocf = ocfs[0][1] if ocfs else None
+    latest_capex = abs(capexs[0][1]) if capexs else 0.0
+    latest_da = abs(das[0][1]) if das else 0.0
+    latest_sbc = abs(sbcs[0][1]) if sbcs else 0.0
+    latest_ni = net_incomes[0][1] if net_incomes else None
+
+    true_oe = None
+    true_oe_yield_pct = None
+    sbc_pct_of_ocf = None
+    maint_capex_real = None
+    if not is_bank_or_insurer and latest_ocf is not None:
+        if latest_da > 0 and latest_capex > latest_da * 1.35:
+            maint_capex_real = latest_da * 1.15
+        elif latest_da > 0:
+            maint_capex_real = min(latest_capex, latest_da * 1.15)
+        else:
+            maint_capex_real = latest_capex * 0.85
+        true_oe = latest_ocf - maint_capex_real - latest_sbc
+        if market_cap > 0:
+            true_oe_yield_pct = round((true_oe / market_cap) * 100.0, 2)
+        if latest_ocf > 0:
+            sbc_pct_of_ocf = round((latest_sbc / latest_ocf) * 100.0, 1)
+
+    # 3. Share Count Trend (Buybacks vs. Dilution)
+    share_series = dil_shares if len(dil_shares) >= 2 else ord_shares
+    share_change_pct = None
+    share_years = 0
+    if len(share_series) >= 2 and share_series[-1][1] > 0:
+        newest_sh = share_series[0][1]
+        oldest_sh = share_series[-1][1]
+        share_change_pct = round(((newest_sh - oldest_sh) / oldest_sh) * 100.0, 1)
+        share_years = len(share_series)
+
+    # 4. Interest Coverage (EBIT / Interest Expense)
+    interest_coverage_x = None
+    latest_ebit = ebits[0][1] if ebits else None
+    latest_int = abs(int_exps[0][1]) if int_exps else 0.0
+    if not is_bank_or_insurer and latest_ebit is not None:
+        if latest_int <= 0:
+            interest_coverage_x = 999.0  # Effectively debt/interest-free
+        else:
+            interest_coverage_x = round(latest_ebit / latest_int, 1)
+
+    # 5. Buffett -30% Revenue Recession Stress Test
+    stress_test_pass = None
+    stress_ebit_margin_pct = None
+    latest_rev = revs[0][1] if revs else 0.0
+    latest_gp = gross_profits[0][1] if gross_profits else None
+    latest_opex = abs(op_expenses[0][1]) if op_expenses else None
+    if not is_bank_or_insurer and latest_rev > 0 and latest_gp is not None and latest_opex is not None:
+        stressed_rev = latest_rev * 0.70
+        stressed_gp = latest_gp * 0.70
+        stressed_opex = latest_opex * 0.85  # Sticky fixed costs (~85% remain in a sharp downturn)
+        stressed_ebit = stressed_gp - stressed_opex
+        stress_ebit_margin_pct = round((stressed_ebit / stressed_rev) * 100.0, 1)
+        stress_test_pass = (stressed_ebit > 0) and (latest_int <= 0 or (stressed_ebit / latest_int) >= 1.5)
+
+    # 6. Revenue Growth Trend & Margin Erosion Check
+    rev_yoy_pct = None
+    rev_cagr_pct = None
+    if len(revs) >= 2 and revs[1][1] > 0:
+        rev_yoy_pct = round(((revs[0][1] - revs[1][1]) / revs[1][1]) * 100.0, 1)
+    if len(revs) >= 3 and revs[-1][1] > 0 and revs[0][1] > 0:
+        span = len(revs) - 1
+        rev_cagr_pct = round((((revs[0][1] / revs[-1][1]) ** (1.0 / span)) - 1.0) * 100.0, 1)
+
+    margin_delta_pct = None
+    if len(op_margin_vals) >= 3:
+        prior_avg_margin = sum(op_margin_vals[1:]) / len(op_margin_vals[1:])
+        margin_delta_pct = round(op_margin_vals[0] - prior_avg_margin, 1)
+
+    # 7. Automated Buffett & Munger Red-Flag Detector (structured codes for EN/BG rendering)
+    red_flags: list[dict] = []
+    if not is_bank_or_insurer:
+        if sbc_pct_of_ocf is not None and sbc_pct_of_ocf >= 20.0:
+            red_flags.append({"code": "sbc_heavy", "val": sbc_pct_of_ocf})
+        if latest_ni is not None and latest_ocf is not None and latest_ocf > 0 and latest_ni > latest_ocf * 1.35:
+            ratio = round((latest_ni / latest_ocf) * 100.0, 0)
+            red_flags.append({"code": "accounting_gain", "val": ratio})
+        if stress_test_pass is False:
+            red_flags.append({"code": "stress_fail", "val": stress_ebit_margin_pct})
+        if interest_coverage_x is not None and interest_coverage_x < 5.0:
+            red_flags.append({"code": "low_interest_cov", "val": interest_coverage_x})
+
+    if share_change_pct is not None and share_change_pct >= 5.0:
+        red_flags.append({"code": "dilution", "val": share_change_pct})
+    if margin_delta_pct is not None and margin_delta_pct <= -4.0:
+        red_flags.append({"code": "margin_erosion", "val": margin_delta_pct})
+    if rev_yoy_pct is not None and rev_yoy_pct <= -5.0:
+        red_flags.append({"code": "rev_decline", "val": rev_yoy_pct})
+
+    return {
+        "is_bank_or_insurer": is_bank_or_insurer,
+        "hist_years": hist_years,
+        "avg_roic_pct": avg_roic_pct,
+        "min_roic_pct": min_roic_pct,
+        "avg_roe_pct": avg_roe_pct,
+        "latest_ocf": latest_ocf,
+        "latest_capex": latest_capex,
+        "latest_da": latest_da,
+        "latest_sbc": latest_sbc,
+        "maint_capex_real": maint_capex_real,
+        "true_owner_earnings": true_oe,
+        "true_oe_yield_pct": true_oe_yield_pct,
+        "sbc_pct_of_ocf": sbc_pct_of_ocf,
+        "share_change_pct": share_change_pct,
+        "share_years": share_years,
+        "interest_coverage_x": interest_coverage_x,
+        "stress_test_pass": stress_test_pass,
+        "stress_ebit_margin_pct": stress_ebit_margin_pct,
+        "rev_yoy_pct": rev_yoy_pct,
+        "rev_cagr_pct": rev_cagr_pct,
+        "margin_delta_pct": margin_delta_pct,
+        "red_flags": red_flags,
     }
 
 
