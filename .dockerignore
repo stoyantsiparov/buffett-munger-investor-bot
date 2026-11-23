@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+data/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.bat
+portfolio-and-budget.md

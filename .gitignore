@@ -1,0 +1,17 @@
+# Secrets & Local Personal Data (NEVER commit to Git!)
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.sqlite
+*.sqlite3
+portfolio-and-budget.md
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/

@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: buffett-munger-telegram-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_ID
+        sync: false
+      - key: BOT_ENCRYPTION_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: T212_API_KEY
+        sync: false
+      - key: T212_API_SECRET
+        sync: false
+      - key: T212_ENV
+        value: live
+      - key: GEMINI_API_KEY
+        sync: false
