@@ -91,6 +91,50 @@ def load_buffett_system_instruction(include_references: bool = False, lang: str 
     return CORE_BUFFETT_SYSTEM_PROMPT_BG if lang == "bg" else CORE_BUFFETT_SYSTEM_PROMPT_EN
 
 
+def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: str) -> str:
+    """Call Gemini Interactions API with a fast Free-Tier friendly model cascade (no 100s hang on 429)."""
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+    use_search = os.environ.get("GEMINI_ENABLE_SEARCH", "").strip() == "1"
+    cascade: list[tuple[str, bool]] = []
+    if use_search:
+        cascade.append(("gemini-4-hydrogen", True))
+    cascade.extend([
+        ("gemini-3.8-flash", False),
+        ("gemini-3.5-flash-lite", False),
+        ("gemini-3.1-flash-lite", False),
+    ])
+
+    last_err: Exception | None = None
+    for model_name, enable_search in cascade:
+        try:
+            kwargs = {
+                "model": model_name,
+                "system_instruction": system_instruction,
+                "input": prompt,
+            }
+            if enable_search:
+                kwargs["tools"] = [{"type": "google_search"}]
+            interaction = client.interactions.create(**kwargs)
+            txt = (getattr(interaction, "output_text", None) or "").strip()
+            if not txt and getattr(interaction, "outputs", None):
+                txt = "\n".join(
+                    (getattr(o, "text", None) or "").strip()
+                    for o in interaction.outputs
+                    if getattr(o, "text", None)
+                ).strip()
+            if txt:
+                return txt
+        except Exception as e:
+            last_err = e
+            continue
+
+    if last_err:
+        raise last_err
+    return ""
+
+
 def _w_get(watch_item: WatchlistItem | dict | None, key: str, default=None):
     if watch_item is None:
         return default
@@ -1085,9 +1129,6 @@ def analyze_stock_with_buffett(
     gemini_key = _get_gemini_api_key(user=user, session=session)
     if gemini_key:
         try:
-            from google import genai
-
-            client = genai.Client(api_key=gemini_key)
             portfolio_ctx = ""
             if latest_snap:
                 portfolio_ctx = (
@@ -1109,19 +1150,18 @@ def analyze_stock_with_buffett(
                     "Write a crisp 4-part summary (under 1100 chars): 1) Moat type & direction; 2) Management & capital allocation ($1 test); "
                     "3) Munger's Inversion (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
                 )
-            interaction = client.interactions.create(
-                model="gemini-4-hydrogen",
-                system_instruction=load_buffett_system_instruction(lang=lang),
-                input=prompt,
-                tools=[{"type": "google_search"}],
+            ai_text = _call_gemini_with_fallback(
+                gemini_key,
+                load_buffett_system_instruction(lang=lang),
+                prompt,
             )
-            if interaction and interaction.output_text:
+            if ai_text:
                 header_lines.extend([
                     "",
-                    "🤖 *3. Задълбочен AI Анализ (Бъфет Агент + Живи новини):*"
+                    "🤖 *3. Задълбочен AI Анализ (Бъфет & Мънгър Агент):*"
                     if is_bg
-                    else "🤖 *3. Deep AI Analysis (Buffett Agent + Live News):*",
-                    interaction.output_text.strip(),
+                    else "🤖 *3. Deep AI Analysis (Buffett & Munger Agent):*",
+                    ai_text,
                 ])
         except Exception as e:
             header_lines.append(
@@ -1169,9 +1209,6 @@ def ask_buffett_agent(
     gemini_key = _get_gemini_api_key(user=user, session=session)
     if gemini_key:
         try:
-            from google import genai
-
-            client = genai.Client(api_key=gemini_key)
             loans_ctx = [
                 {
                     "lender": l.lender_name,
@@ -1231,15 +1268,14 @@ def ask_buffett_agent(
                     else "Answer concisely for Telegram in English (under 2400 chars), with exact numbers and a clear recommendation on whether to reinforce an existing holding or open a new Watchlist position."
                 )
             )
-            interaction = client.interactions.create(
-                model="gemini-4-hydrogen",
-                system_instruction=load_buffett_system_instruction(lang=lang),
-                input=full_prompt,
-                tools=[{"type": "google_search"}],
+            ai_text = _call_gemini_with_fallback(
+                gemini_key,
+                load_buffett_system_instruction(lang=lang),
+                full_prompt,
             )
-            if interaction and interaction.output_text:
+            if ai_text:
                 title = "🤖 *БЪФЕТ & МЪНГЪР АГЕНТ:*" if is_bg else "🤖 *BUFFETT & MUNGER AGENT:*"
-                return f"{title}\n\n{interaction.output_text.strip()}"
+                return f"{title}\n\n{ai_text}"
         except Exception as e:
             fallback_note = (
                 f"_(AI връзката върна грешка: {e} — показвам живия количествен разчет по Бъфет)_\n\n"
