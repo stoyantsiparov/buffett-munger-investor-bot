@@ -140,8 +140,8 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     from google.genai import types as genai_types
 
     # Disable internal multi-minute 503 retry loops (attempts=1 -> max_retries=0)
-    # and cap each attempt at 14s so the bot fails over instantly to the next model.
-    http_opts_kwargs: dict = {"timeout": 14000}
+    # and cap each attempt so the bot fails over fast across both Gemini & Gemma 4 pools.
+    http_opts_kwargs: dict = {"timeout": 18000}
     retry_cls = getattr(genai_types, "HttpRetryOptions", None)
     if retry_cls is not None:
         http_opts_kwargs["retry_options"] = retry_cls(attempts=1)
@@ -150,29 +150,33 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
         http_options=genai_types.HttpOptions(**http_opts_kwargs),
     )
     use_search = os.environ.get("GEMINI_ENABLE_SEARCH", "").strip() == "1"
-    cascade: list[tuple[str, bool]] = []
+    # Tuple: (model_name, enable_search, thinking_level_or_none, per_attempt_timeout_sec)
+    cascade: list[tuple[str, bool, str | None, float]] = []
     if use_search:
-        cascade.append(("gemini-4-hydrogen", True))
+        cascade.append(("gemini-4-hydrogen", True, "low", 16.0))
     cascade.extend([
-        ("gemini-3.8-flash", False),
-        ("gemini-3.5-flash-lite", False),
-        ("gemma-4-31b-it", False),
-        ("gemma-4-26b-a4b-it", False),
-        ("gemini-3.1-flash-lite", False),
+        ("gemini-3.8-flash", False, "low", 16.0),
+        ("gemma-4-31b-it", False, None, 12.0),
+        ("gemini-3.5-flash-lite", False, "minimal", 10.0),
+        ("gemma-4-26b-a4b-it", False, None, 10.0),
     ])
 
-    deadline = time.monotonic() + 28.0
+    deadline = time.monotonic() + 38.0
     last_err: Exception | None = None
-    for model_name, enable_search in cascade:
+    for model_name, enable_search, thinking_lvl, attempt_timeout in cascade:
         remaining = deadline - time.monotonic()
-        if remaining < 3.0:
+        if remaining < 4.0:
             break
         try:
+            gen_cfg: dict = {"max_output_tokens": 1200}
+            if thinking_lvl:
+                gen_cfg["thinking_level"] = thinking_lvl
             kwargs = {
                 "model": model_name,
                 "system_instruction": system_instruction,
                 "input": prompt,
-                "timeout": min(12.0, remaining),
+                "generation_config": gen_cfg,
+                "timeout": min(attempt_timeout, remaining),
             }
             if enable_search:
                 kwargs["tools"] = [{"type": "google_search"}]
@@ -1063,10 +1067,10 @@ def build_dynamic_investment_plan_lines(
     if ranked_port["pies"]:
         if ranked_port["semi_blocked"]:
             lines.append(
-                f"⚠️ *Сектор Полупроводници е `{ranked_port['semi_pct']:.2f}%` (>20% таван):* "
+                f"⚠️ *Сектор Полупроводници е {ranked_port['semi_pct']:.2f}% (>20% таван):* "
                 "Ботът автоматично изключи чиповете от днешните покупки."
                 if is_bg
-                else f"⚠️ *Semiconductors at `{ranked_port['semi_pct']:.2f}%` (>20% cap):* "
+                else f"⚠️ *Semiconductors at {ranked_port['semi_pct']:.2f}% (>20% cap):* "
                 "Chips are automatically excluded from today's buy plan."
             )
         total_pie_val = sum(p["pie_value"] for p in ranked_port["pies"]) or 1.0
@@ -1097,7 +1101,7 @@ def build_dynamic_investment_plan_lines(
     top3_wl = rank_top3_watchlist_opportunities(session, user, latest_snap, lang=lang)
     if top3_wl:
         wl_str = " | ".join(
-            f"*#{i+1} `{x['ticker']}`* (`{x['currency_sym']}{x['last_price']:.2f}`, {x['status_tag']})"
+            f"*#{i+1} {x['ticker']}* (`{x['currency_sym']}{x['last_price']:.2f}`, {x['status_tag']})"
             for i, x in enumerate(top3_wl)
         )
         lines.append(
@@ -1584,7 +1588,7 @@ def ask_buffett_agent(
         for idx, x in enumerate(unified["top3"], 1):
             sym = x["currency_sym"]
             lines.append(
-                f"  {idx}️⃣ *`{x['ticker']}`* — {x['source_badge']}\n"
+                f"  {idx}️⃣ *{x['ticker']}* — {x['source_badge']}\n"
                 f"     └ `{sym}{x['last_price']:,.2f}` | IV `{sym}{x['iv_low']:,.0f}–{sym}{x['iv_high']:,.0f}` | {x['status_tag']}"
             )
         if unified["comparison_insight"]:
