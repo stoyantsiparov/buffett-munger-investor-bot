@@ -2028,9 +2028,23 @@ async def post_init_setup(application: Application) -> None:
     ]
     try:
         await application.bot.set_my_commands(commands)
-        logger.info("Registered %d native Telegram slash commands.", len(commands))
+        await application.bot.set_my_short_description(
+            short_description=(
+                "Warren Buffett & Charlie Munger value investing bot — Owner Earnings, Unified Top 3, Trading 212 & Gemini AI."
+            )
+        )
+        await application.bot.set_my_description(
+            description=(
+                "🏰 Buffett & Munger Investor Bot\n\n"
+                "• Live Owner Earnings intrinsic valuation & 10-point stock scorecards\n"
+                "• Unified Top 3 ranker (shared Watchlist vs. your Trading 212 portfolio)\n"
+                "• Weekly buy-zone alerts, dynamic monthly plans & built-in Gemini AI\n"
+                "• 100% private per user (AES-128 encrypted) • English & Bulgarian (/lang)"
+            )
+        )
+        logger.info("Registered %d native Telegram slash commands and English bot profile.", len(commands))
     except Exception as e:
-        logger.warning("Could not register Telegram slash commands: %s", e)
+        logger.warning("Could not register Telegram slash commands/profile: %s", e)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
