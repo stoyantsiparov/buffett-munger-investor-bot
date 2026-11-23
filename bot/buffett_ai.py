@@ -2,11 +2,14 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 import math
 import os
 import re
 import time
 from pathlib import Path
+
+logger = logging.getLogger("buffett_bot")
 from sqlalchemy.orm import Session
 from bot.crypto import decrypt_secret
 from bot.i18n import format_ordinal, get_lang, localize_moat
@@ -153,10 +156,12 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     cascade.extend([
         ("gemini-3.8-flash", False),
         ("gemini-3.5-flash-lite", False),
+        ("gemma-4-31b-it", False),
+        ("gemma-4-26b-a4b-it", False),
         ("gemini-3.1-flash-lite", False),
     ])
 
-    deadline = time.monotonic() + 26.0
+    deadline = time.monotonic() + 28.0
     last_err: Exception | None = None
     for model_name, enable_search in cascade:
         remaining = deadline - time.monotonic()
@@ -167,7 +172,7 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
                 "model": model_name,
                 "system_instruction": system_instruction,
                 "input": prompt,
-                "timeout": min(14.0, remaining),
+                "timeout": min(12.0, remaining),
             }
             if enable_search:
                 kwargs["tools"] = [{"type": "google_search"}]
@@ -180,8 +185,10 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
                     if getattr(o, "text", None)
                 ).strip()
             if txt:
+                logger.info("Gemini AI succeeded with model=%s", model_name)
                 return txt
         except Exception as e:
+            logger.warning("Gemini AI model=%s failed: %s", model_name, str(e)[:180])
             last_err = e
             continue
 
@@ -940,35 +947,35 @@ def rank_unified_top3_opportunities(
         w1 = has_wl[0]
         if top3[0]["source"] in ("portfolio", "both"):
             insight = (
-                f"Днес *`{p1['ticker']}`* (вече в портфейла ти) води класирането — можеш да я подсилиш на отстъпка "
-                f"без да раздробяваш портфейла, или да добавиш нова позиция в *`{w1['ticker']}`* от Watchlist."
+                f"Днес {p1['ticker']} (вече в портфейла ти) води класирането — можеш да я подсилиш на отстъпка "
+                f"без да раздробяваш портфейла, или да добавиш нова позиция в {w1['ticker']} от Watchlist."
                 if is_bg
-                else f"Today *`{p1['ticker']}`* (already in your portfolio) leads the ranking — reinforce it at a discount "
-                f"without diluting focus, or open a new position in *`{w1['ticker']}`* from the Watchlist."
+                else f"Today {p1['ticker']} (already in your portfolio) leads the ranking — reinforce it at a discount "
+                f"without diluting focus, or open a new position in {w1['ticker']} from the Watchlist."
             )
         else:
             insight = (
-                f"Днес *`{w1['ticker']}`* (нова от Watchlist) предлага най-висок марж на безопасност, "
-                f"а *`{p1['ticker']}`* е най-силната подценена позиция за подсилване вътре в портфейла ти!"
+                f"Днес {w1['ticker']} (нова от Watchlist) предлага най-висок марж на безопасност, "
+                f"а {p1['ticker']} е най-силната подценена позиция за подсилване вътре в портфейла ти!"
                 if is_bg
-                else f"Today *`{w1['ticker']}`* (new from Watchlist) offers the highest Margin of Safety, "
-                f"while *`{p1['ticker']}`* is the strongest undervalued holding to reinforce inside your portfolio!"
+                else f"Today {w1['ticker']} (new from Watchlist) offers the highest Margin of Safety, "
+                f"while {p1['ticker']} is the strongest undervalued holding to reinforce inside your portfolio!"
             )
     elif has_port:
         p1 = has_port[0]
         insight = (
-            f"Днес най-добрите сделки са *вътре в твоя портфейл* (води *`{p1['ticker']}`*) — "
+            f"Днес най-добрите сделки са вътре в твоя портфейл (води {p1['ticker']}) — "
             "по Бъфет е по-умно да подсилиш чудесен бизнес, който вече притежаваш на отстъпка, вместо да купуваш по-скъпа нова компания!"
             if is_bg
-            else f"Today's best bargains are *inside your own portfolio* (led by *`{p1['ticker']}`*) — "
+            else f"Today's best bargains are inside your own portfolio (led by {p1['ticker']}) — "
             "per Buffett, reinforcing a great business you already own at a discount beats adding a pricier new stock!"
         )
     elif has_wl:
         w1 = has_wl[0]
         insight = (
-            f"Днес *`{w1['ticker']}`* от общия Watchlist предлага по-добра цена и марж на безопасност от акциите в портфейла."
+            f"Днес {w1['ticker']} от общия Watchlist предлага по-добра цена и марж на безопасност от акциите в портфейла."
             if is_bg
-            else f"Today *`{w1['ticker']}`* from the shared Watchlist offers a stronger Margin of Safety than existing holdings."
+            else f"Today {w1['ticker']} from the shared Watchlist offers a stronger Margin of Safety than existing holdings."
         )
 
     return {"top3": top3, "all_ranked": ranked_all, "comparison_insight": insight}
@@ -1009,14 +1016,14 @@ def build_dynamic_investment_plan_lines(
         if is_bg:
             lines.append(
                 f"🛡️ *ПРИОРИТЕТ — Ликвиден буфер:* Текущо `{cur}{user.emergency_buffer_current:,.2f}` / цел `{cur}{user.emergency_buffer_target:,.2f}` "
-                f"_(липсват `{cur}{buf_missing:,.2f}`)_. По правилото на Бъфет задели първо *`{cur}{suggested_to_buffer:,.2f}`* към буфера, "
-                f"а останалите *`{cur}{investable_now:,.2f}`* инвестирай в Trading 212!"
+                f"_(липсват {cur}{buf_missing:,.2f})_. По правилото на Бъфет задели първо `{cur}{suggested_to_buffer:,.2f}` към буфера, "
+                f"а останалите `{cur}{investable_now:,.2f}` инвестирай в Trading 212!"
             )
         else:
             lines.append(
                 f"🛡️ *PRIORITY — Liquidity Buffer:* Current `{cur}{user.emergency_buffer_current:,.2f}` / target `{cur}{user.emergency_buffer_target:,.2f}` "
-                f"_(missing `{cur}{buf_missing:,.2f}`)_. Per Buffett's liquidity rule, allocate *`{cur}{suggested_to_buffer:,.2f}`* to your cash buffer first, "
-                f"and invest the remaining *`{cur}{investable_now:,.2f}`* in Trading 212!"
+                f"_(missing {cur}{buf_missing:,.2f})_. Per Buffett's liquidity rule, allocate `{cur}{suggested_to_buffer:,.2f}` to your cash buffer first, "
+                f"and invest the remaining `{cur}{investable_now:,.2f}` in Trading 212!"
             )
     elif buf_missing > 0:
         lines.append(
