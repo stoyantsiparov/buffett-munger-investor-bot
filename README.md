@@ -43,27 +43,22 @@ Most retail investing tools drown you in noisy charts, hype, and short-term pric
 
 ---
 
-## 📱 Example Output (`🔔 Топ 3 & Аларми`)
+## 📱 Live Screenshots (Telegram Dark Mode)
 
-```text
-🔔 BUY ALERT IN SHARED BUFFETT WATCHLIST!
-🟢 #1 INTU (Intuit)
-   • Current Price: $279.18 <= Target Buy: $285.00
-   • Intrinsic Value: $350 – $420 (Discount: +33.5%)
-   • Moat: Switching Costs + Network Effect (QuickBooks, TurboTax) • Stable
-
-💼 UNDERVALUED STOCKS IN YOUR PORTFOLIO (TRADING 212):
-🟢 META (Meta Platforms) (Weight: 7.4% / target 8%)
-   • Current Price: $595.10 <= Target Buy: $652.73
-   • Intrinsic Value: $746 – $895 (Discount: +33.5%)
-   • Moat: Global Social Network Effect (3.2B+ users) • Stable
-   • ⚠️ Undervalued but blocked by sector cap (>20%): NVDA (+34%)
-
-🏆 UNIFIED TOP 3 TODAY (WATCHLIST vs. YOUR PORTFOLIO):
-  1️⃣ META — 💼 Your Portfolio (reinforce 7.4%/8%) | 🟢 IN BUY ZONE (+28% MoS)
-  2️⃣ INTU — 🎯 Watchlist (new)                    | 🟢 IN BUY ZONE (+28% MoS)
-  3️⃣ NFLX — 💼 Your Portfolio (reinforce 7.5%/8%) | 🟡 Undervalued (+19% to IV)
-```
+<div align="center">
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <strong>🔔 Unified Top 3 & Buy Alerts (<code>/check_alerts</code>)</strong><br/><br/>
+      <img src="docs/screenshots/top3_alerts.png" alt="Unified Top 3 and Price Alerts in Telegram" width="380" />
+    </td>
+    <td align="center" width="50%">
+      <strong>🧠 10-Point Buffett Scorecard & Bilingual Switcher (<code>/buffett</code> & <code>/lang</code>)</strong><br/><br/>
+      <img src="docs/screenshots/buffett_scorecard_lang.png" alt="Buffett Stock Scorecard and Language Switcher in Telegram" width="380" />
+    </td>
+  </tr>
+</table>
+</div>
 
 ---
 
