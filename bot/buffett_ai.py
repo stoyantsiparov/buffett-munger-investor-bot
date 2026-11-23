@@ -140,8 +140,9 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     from google.genai import types as genai_types
 
     # Disable internal multi-minute 503 retry loops (attempts=1 -> max_retries=0)
-    # and cap each attempt so the bot fails over fast across both Gemini & Gemma 4 pools.
-    http_opts_kwargs: dict = {"timeout": 18000}
+    # so overloaded models (503/429) fail over in <1s, while healthy models get
+    # enough time (25-30s) to finish generating without premature client timeouts.
+    http_opts_kwargs: dict = {"timeout": 30000}
     retry_cls = getattr(genai_types, "HttpRetryOptions", None)
     if retry_cls is not None:
         http_opts_kwargs["retry_options"] = retry_cls(attempts=1)
@@ -153,19 +154,19 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     # Tuple: (model_name, enable_search, thinking_level_or_none, per_attempt_timeout_sec)
     cascade: list[tuple[str, bool, str | None, float]] = []
     if use_search:
-        cascade.append(("gemini-4-hydrogen", True, "low", 16.0))
+        cascade.append(("gemini-4-hydrogen", True, "low", 30.0))
     cascade.extend([
-        ("gemini-3.8-flash", False, "low", 16.0),
-        ("gemma-4-31b-it", False, None, 12.0),
-        ("gemini-3.5-flash-lite", False, "minimal", 10.0),
-        ("gemma-4-26b-a4b-it", False, None, 10.0),
+        ("gemini-3.8-flash", False, "minimal", 30.0),
+        ("gemma-4-26b-a4b-it", False, None, 25.0),
+        ("gemma-4-31b-it", False, None, 25.0),
+        ("gemini-3.5-flash-lite", False, "minimal", 20.0),
     ])
 
-    deadline = time.monotonic() + 38.0
+    deadline = time.monotonic() + 55.0
     last_err: Exception | None = None
     for model_name, enable_search, thinking_lvl, attempt_timeout in cascade:
         remaining = deadline - time.monotonic()
-        if remaining < 4.0:
+        if remaining < 5.0:
             break
         try:
             gen_cfg: dict = {"max_output_tokens": 1200}
