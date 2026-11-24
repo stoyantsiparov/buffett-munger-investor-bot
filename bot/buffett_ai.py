@@ -199,10 +199,11 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     if use_search:
         cascade.append(("gemini-4-hydrogen", True, "low", 18.0))
     cascade.extend([
-        ("gemini-3.5-flash-lite", False, "minimal", 16.0),
-        ("gemini-3.8-flash", False, "low", 16.0),
+        ("gemini-3.5-flash-lite", False, "minimal", 15.0),
+        ("gemini-3.8-flash", False, "low", 15.0),
         ("gemma-4-26b-a4b-it", False, None, 15.0),
         ("gemma-4-31b-it", False, None, 15.0),
+        ("gemini-4-hydrogen", False, "low", 15.0),
     ])
 
     deadline = time.monotonic() + 55.0
@@ -240,8 +241,13 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
             last_err = e
             continue
 
-    # Secondary fallback via classic models.generate_content if /interactions is overloaded (503)
-    for fallback_model in ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"):
+    # Secondary fallback via models.generate_content endpoint using current generation models
+    for fallback_model in (
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemma-4-26b-a4b-it",
+        "gemma-4-31b-it",
+    ):
         remaining = deadline - time.monotonic()
         if remaining < 4.0:
             break
@@ -262,6 +268,32 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
             logger.warning("Gemini AI generate_content model=%s failed: %s", fallback_model, str(e)[:180])
             last_err = e
             continue
+
+    # Final brief jitter retry on /interactions if transient 503 spike occurred
+    if last_err and "503" in str(last_err) and (deadline - time.monotonic()) > 10.0:
+        time.sleep(2.0)
+        for model_name, thinking_lvl in (("gemini-3.5-flash-lite", "minimal"), ("gemini-3.8-flash", "low"), ("gemma-4-26b-a4b-it", None)):
+            remaining = deadline - time.monotonic()
+            if remaining < 4.0:
+                break
+            try:
+                gen_cfg = {"max_output_tokens": 1200}
+                if thinking_lvl:
+                    gen_cfg["thinking_level"] = thinking_lvl
+                interaction = client.interactions.create(
+                    model=model_name,
+                    system_instruction=system_instruction,
+                    input=prompt,
+                    generation_config=gen_cfg,
+                    timeout=min(14.0, remaining),
+                )
+                txt = (getattr(interaction, "output_text", None) or "").strip()
+                if txt:
+                    logger.info("Gemini AI succeeded on 503-retry with model=%s", model_name)
+                    return txt
+            except Exception as e:
+                last_err = e
+                continue
 
     if last_err:
         raise last_err
@@ -1781,6 +1813,11 @@ def ask_buffett_agent(
     port_evals = evaluate_user_portfolio_undervalued(session, user, latest_snap, lang=lang) if latest_snap else []
     unified = rank_unified_top3_opportunities(session, user, latest_snap, port_evals, lang=lang)
 
+    routed_playbooks = select_playbooks_for_question(
+        question,
+        mentioned_playbooks=[],
+        lang=lang,
+    )
     gemini_key = _get_gemini_api_key(user=user, session=session)
     if gemini_key:
         try:
@@ -1956,6 +1993,14 @@ def ask_buffett_agent(
         fallback_note.strip(),
         "",
     ]
+    if routed_playbooks:
+        lines.extend([
+            "📚 *ПРИЛОЖЕНИ ПЛЕЙБУЦИ И ПРАВИЛА НА БЪФЕТ & МЪНГЪР ПО ВЪПРОСА ТИ:*"
+            if is_bg
+            else "📚 *ROUTED BUFFETT & MUNGER PLAYBOOKS FOR YOUR QUESTION:*",
+            routed_playbooks,
+            "",
+        ])
     if unified["top3"]:
         lines.append(
             "🏆 *ОБЩ ТОП 3 ДНЕС (WATCHLIST vs. ТВОЯТ ПОРТФЕЙЛ):*"

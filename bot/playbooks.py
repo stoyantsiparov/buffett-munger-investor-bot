@@ -699,7 +699,21 @@ def select_playbooks_for_question(
     q = (question or "").lower()
     selected: list[str] = []
 
-    # 1) Route by question intent keywords (EN + BG)
+    # 1) Route by question intent keywords (EN + BG), prioritizing AGM Masterclass (09) & Munger Worldly Wisdom (10)
+    if any(k in q for k in (
+        "scale", "prayer", "kirkland", "kraft", "ltcm", "gravity", "treasury", "bullshit", "ebitda", "converg", "press", "agm", "casino",
+        "lehman", "aig", "10-k", "1 million", "$1m", "50%", "green bay", "fish", "quota",
+        "мащаб", "молитв", "гравитац", "облигац", "конвергенц", "пресконференц", "казино", "фалшив", "леман", "риболов", "1 милион", "квота", "корица",
+    )):
+        selected.append(THEMATIC_PLAYBOOKS["press_conference_masterclass_09"][lang_key])
+
+    if any(k in q for k in (
+        "munger", "checklist", "bias", "psychol", "darwin", "lollapalooza", "incentive", "envy", "messenger", "misjudg",
+        "planck", "chauffeur", "iron prescription", "whirlpool", "trust", "vanity", "usc",
+        "мънгър", "чеклист", "психолог", "дарвин", "лолапалуза", "стимул", "завист", "вестоносец", "грешк", "планк", "шофьор", "доверие", "суета", "желязната рецепта",
+    )):
+        selected.append(THEMATIC_PLAYBOOKS["munger_psychology_checklist_10"][lang_key])
+
     if any(k in q for k in (
         "sell", "trim", "hold", "drop", "crash", "overvalued", "trap", "exit",
         "прод", "задържа", "падна", "срив", "надценен", "капан", "изляза", "загуба",
@@ -729,20 +743,6 @@ def select_playbooks_for_question(
         "пазар", "диверсиф", "концентрац", "кръг", "инверсия", "инфлация", "данък", "сложен процент", "търпение", "буфер", "кредит",
     )):
         selected.append(THEMATIC_PLAYBOOKS["philosophy_and_mental_01_02"][lang_key])
-
-    if any(k in q for k in (
-        "scale", "prayer", "kirkland", "kraft", "ltcm", "gravity", "treasury", "bullshit", "ebitda", "converg", "press", "agm", "casino",
-        "lehman", "aig", "10-k", "1 million", "50%", "fish", "quota",
-        "мащаб", "молитв", "гравитац", "облигац", "конвергенц", "пресконференц", "казино", "фалшив", "леман", "риболов", "1 милион", "квота",
-    )):
-        selected.append(THEMATIC_PLAYBOOKS["press_conference_masterclass_09"][lang_key])
-
-    if any(k in q for k in (
-        "munger", "checklist", "bias", "psychol", "darwin", "lollapalooza", "incentive", "envy", "messenger", "misjudg",
-        "planck", "chauffeur", "iron prescription", "whirlpool", "trust", "vanity",
-        "мънгър", "чеклист", "психолог", "дарвин", "лолапалуза", "стимул", "завист", "вестоносец", "грешк", "планк", "шофьор", "доверие", "суета",
-    )):
-        selected.append(THEMATIC_PLAYBOOKS["munger_psychology_checklist_10"][lang_key])
 
     # 2) Route by explicit industry keywords in question + mentioned tickers' classified industries
     ind_keys: list[str] = list(mentioned_playbooks or [])
