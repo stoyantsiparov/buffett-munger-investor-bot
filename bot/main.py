@@ -1160,6 +1160,8 @@ async def _handle_pick_stock(chat, user: User, ticker: str) -> None:
             if watch_item and metrics.get("price"):
                 watch_item.last_price = metrics["price"]
                 session.commit()
+            if watch_item and watch_item.company_name and metrics.get("name") == ticker:
+                metrics["name"] = watch_item.company_name
 
             score = compute_quantitative_buffett_scorecard(metrics, watch_item, lang=lang)
             cur_sym = "$" if metrics.get("currency") == "USD" else ("p " if metrics.get("currency") == "GBX" else "€")
@@ -1500,6 +1502,8 @@ async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
             if watch_item and metrics.get("price"):
                 watch_item.last_price = metrics["price"]
                 session.commit()
+            if watch_item and watch_item.company_name and metrics.get("name") == ticker:
+                metrics["name"] = watch_item.company_name
 
             db_user = session.query(User).filter(User.id == user.id).first()
 

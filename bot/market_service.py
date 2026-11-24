@@ -12,24 +12,42 @@ def fetch_stock_fundamentals(ticker: str) -> dict:
     """Fetch key Buffett & Munger fundamental metrics for a stock ticker via yfinance."""
     clean_symbol = ticker.strip().upper()
     t = yf.Ticker(clean_symbol)
-    info = t.info or {}
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+
+    fast = getattr(t, "fast_info", None)
 
     price = (
         info.get("currentPrice")
         or info.get("regularMarketPrice")
         or info.get("previousClose")
     )
-    if price is None:
-        fast = getattr(t, "fast_info", None)
-        if fast:
+    if price is None and fast:
+        try:
             price = getattr(fast, "last_price", None) or getattr(fast, "previous_close", None)
+        except Exception:
+            pass
 
-    currency = info.get("currency", "USD")
+    currency = info.get("currency")
+    if not currency and fast:
+        try:
+            currency = getattr(fast, "currency", None)
+        except Exception:
+            pass
+    currency = currency or "USD"
+
     name = info.get("longName") or info.get("shortName") or clean_symbol
     sector = info.get("sector", "N/A")
     industry = info.get("industry", "N/A")
 
     market_cap = info.get("marketCap") or 0
+    if not market_cap and fast:
+        try:
+            market_cap = getattr(fast, "market_cap", None) or 0
+        except Exception:
+            market_cap = 0
     pe_trailing = info.get("trailingPE")
     pe_forward = info.get("forwardPE")
     price_to_book = info.get("priceToBook")
@@ -385,6 +403,44 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         red_flags.append({"code": "rev_decline", "val": rev_yoy_pct})
     if passes_one_dollar_test is False and roiic_pct is not None and roiic_pct < 0.0:
         red_flags.append({"code": "failed_dollar_test", "val": roiic_pct})
+
+    # 8. Cloud-IP Resilience Backfill: If Yahoo Finance rate-limited `t.info` on a shared cloud IP,
+    # populate missing TTM fields in `info_metrics` directly from the latest annual GAAP statements!
+    if info_metrics is not None:
+        price_val = float(info_metrics.get("price") or 0.0)
+        newest_shares_val = share_series[0][1] if share_series else 0.0
+        if (not info_metrics.get("market_cap")) and price_val > 0 and newest_shares_val > 0:
+            market_cap = round(price_val * newest_shares_val, 2)
+            info_metrics["market_cap"] = market_cap
+            if true_oe is not None and market_cap > 0:
+                true_oe_yield_pct = round((true_oe / market_cap) * 100.0, 2)
+        if info_metrics.get("pe_trailing") is None and latest_ni and latest_ni > 0 and market_cap > 0:
+            info_metrics["pe_trailing"] = round(market_cap / latest_ni, 2)
+        if info_metrics.get("gross_margin_pct") is None and latest_rev > 0 and latest_gp is not None:
+            info_metrics["gross_margin_pct"] = round((latest_gp / latest_rev) * 100.0, 2)
+        if info_metrics.get("operating_margin_pct") is None and op_margin_vals:
+            info_metrics["operating_margin_pct"] = op_margin_vals[0]
+        if info_metrics.get("roic_est_pct") is None and roic_vals:
+            info_metrics["roic_est_pct"] = roic_vals[0]
+        if info_metrics.get("roe_pct") is None and roe_vals:
+            info_metrics["roe_pct"] = roe_vals[0]
+        if (not info_metrics.get("owner_earnings_est")) and latest_ocf is not None and maint_capex_real is not None:
+            oe_fallback = float(latest_ocf - maint_capex_real)
+            info_metrics["owner_earnings_est"] = oe_fallback
+            if market_cap > 0:
+                info_metrics["owner_earnings_yield_pct"] = round((oe_fallback / market_cap) * 100.0, 2)
+        if info_metrics.get("cash_conversion_pct") is None and latest_ocf is not None and latest_ni and latest_ni > 0:
+            info_metrics["cash_conversion_pct"] = round((latest_ocf / latest_ni) * 100.0, 2)
+        if (not info_metrics.get("net_debt")) and (debts or cashes):
+            nd_fallback = float((debts[0][1] if debts else 0.0) - (cashes[0][1] if cashes else 0.0))
+            info_metrics["net_debt"] = nd_fallback
+            ebitda_fallback = (latest_ebit or 0.0) + latest_da
+            if info_metrics.get("net_debt_to_ebitda") is None and ebitda_fallback > 0:
+                info_metrics["net_debt_to_ebitda"] = round(nd_fallback / ebitda_fallback, 2)
+        if not info_metrics.get("operating_cashflow") and latest_ocf is not None:
+            info_metrics["operating_cashflow"] = float(latest_ocf)
+        if not info_metrics.get("net_income") and latest_ni is not None:
+            info_metrics["net_income"] = float(latest_ni)
 
     return {
         "is_bank_or_insurer": is_bank_or_insurer,
