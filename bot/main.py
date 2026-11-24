@@ -31,6 +31,7 @@ from telegram.ext import (
 from bot.buffett_ai import (
     _get_gemini_api_key,
     analyze_stock_with_buffett,
+    analyze_stock_with_munger_checklist,
     ask_buffett_agent,
     build_dynamic_investment_plan_lines,
     clear_user_chat_history,
@@ -1525,15 +1526,110 @@ async def _run_buffett_analysis_reply(chat, user: User, ticker: str) -> None:
                         callback_data=f"pick_{ticker}",
                     ),
                     InlineKeyboardButton(
+                        f"🦅 Мънгър Чеклист ({ticker})" if is_bg else f"🦅 Munger Checklist ({ticker})",
+                        callback_data=f"munger_{ticker}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
                         "➕ Добави в Watchlist" if is_bg else "➕ Add to Watchlist",
                         callback_data=f"quickwatch_{ticker}",
+                    ),
+                ],
+            ]
+        )
+        await safe_edit(wait_msg, report, reply_markup=kb)
+    except Exception as e:
+        await safe_edit(wait_msg, f"❌ Analysis error for *{ticker}*: `{e}`")
+
+
+async def cmd_munger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run Charlie Munger's Two-Track Analysis & 12-Point Aviation Checklist (/munger TICKER)."""
+    user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
+    if not context.args:
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🦅 INTU", callback_data="munger_INTU"),
+                    InlineKeyboardButton("🦅 META", callback_data="munger_META"),
+                    InlineKeyboardButton("🦅 AAPL", callback_data="munger_AAPL"),
+                ],
+                [
+                    InlineKeyboardButton("🦅 KO", callback_data="munger_KO"),
+                    InlineKeyboardButton("🦅 CRWD", callback_data="munger_CRWD"),
+                    InlineKeyboardButton("🦅 JPM", callback_data="munger_JPM"),
+                ],
+            ]
+        )
+        await safe_reply(
+            update.effective_message,
+            "🦅 *ЧАРЛИ МЪНГЪР: 12-ТОЧКОВ АВИАЦИОНЕН ЧЕКЛИСТ & 25 ПСИХОЛОГИЧЕСКИ КАПАНА*\n\n"
+            "Напиши `/munger ТИКЪР` (напр. `/munger META`) или избери компания долу:"
+            if is_bg
+            else "🦅 *CHARLIE MUNGER: 12-POINT AVIATION CHECKLIST & 25 COGNITIVE BIASES*\n\n"
+            "Send `/munger TICKER` (e.g. `/munger META`) or pick a company below:",
+            reply_markup=kb,
+        )
+        return
+    ticker = context.args[0].strip().upper()
+    await _run_munger_checklist_reply(update.effective_chat, user, ticker)
+
+
+async def _run_munger_checklist_reply(chat, user: User, ticker: str) -> None:
+    is_bg = get_lang(user) == "bg"
+    wait_msg = await chat.send_message(
+        f"🦅 Изпълнявам Двупистовия анализ на Чарли Мънгър, 12-точковия чеклист и Правилото на Дарвин за *{ticker}*..."
+        if is_bg
+        else f"🦅 Running Charlie Munger's Two-Track Analysis, 12-Point Aviation Checklist & Darwin's Rule for *{ticker}*...",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    try:
+        metrics = await asyncio.to_thread(fetch_stock_fundamentals, ticker)
+        deep_metrics = await asyncio.to_thread(fetch_deep_historical_metrics, ticker, metrics)
+        with get_session() as session:
+            master_id = get_master_watchlist_owner_id(session)
+            watch_item = (
+                session.query(WatchlistItem)
+                .filter(WatchlistItem.user_id == master_id, WatchlistItem.ticker == ticker)
+                .first()
+            )
+            latest_snap = (
+                session.query(PortfolioSnapshot)
+                .filter(PortfolioSnapshot.user_id == user.id)
+                .order_by(PortfolioSnapshot.created_at.desc())
+                .first()
+            )
+            if watch_item and watch_item.company_name and metrics.get("name") == ticker:
+                metrics["name"] = watch_item.company_name
+            db_user = session.query(User).filter(User.id == user.id).first()
+
+        report = await asyncio.to_thread(
+            analyze_stock_with_munger_checklist,
+            metrics,
+            watch_item,
+            db_user,
+            latest_snap,
+            None,
+            deep_metrics,
+        )
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"🧠 Пълен Бъфет Анализ ({ticker})" if is_bg else f"🧠 Full Buffett Scorecard ({ticker})",
+                        callback_data=f"buffett_{ticker}",
+                    ),
+                    InlineKeyboardButton(
+                        f"🎯 Избери {ticker} за покупка" if is_bg else f"🎯 Buy Ticket: {ticker}",
+                        callback_data=f"pick_{ticker}",
                     ),
                 ]
             ]
         )
         await safe_edit(wait_msg, report, reply_markup=kb)
     except Exception as e:
-        await safe_edit(wait_msg, f"❌ Analysis error for *{ticker}*: `{e}`")
+        await safe_edit(wait_msg, f"❌ Munger Checklist error for *{ticker}*: `{e}`")
 
 
 async def cmd_set_loan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1916,6 +2012,10 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ticker = data.split("_", 1)[1].strip().upper()
         await _run_buffett_analysis_reply(query.message.chat, user, ticker)
 
+    elif data.startswith("munger_"):
+        ticker = data.split("_", 1)[1].strip().upper()
+        await _run_munger_checklist_reply(query.message.chat, user, ticker)
+
     elif data.startswith("quickwatch_"):
         ticker = data.split("_", 1)[1].strip().upper()
         context.args = [ticker]
@@ -2033,6 +2133,7 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("watchlist", "Shared Buffett & Munger Watchlist"),
         BotCommand("ask", "Ask the Buffett & Munger AI Agent"),
         BotCommand("buffett", "10-point Buffett stock scorecard (/buffett INTU)"),
+        BotCommand("munger", "Charlie Munger 12-point checklist & 25 biases (/munger META)"),
         BotCommand("add_watch", "Add a stock to the shared Watchlist"),
         BotCommand("set_budget", "Set income, invest budget & cash buffer"),
         BotCommand("set_buffer", "Update emergency cash buffer"),
@@ -2130,6 +2231,7 @@ def main() -> None:
     app.add_handler(CommandHandler("add_watch", cmd_add_watch))
     app.add_handler(CommandHandler("del_watch", cmd_del_watch))
     app.add_handler(CommandHandler("buffett", cmd_buffett))
+    app.add_handler(CommandHandler("munger", cmd_munger))
     app.add_handler(CommandHandler("ask", cmd_ask))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("set_loan", cmd_set_loan))

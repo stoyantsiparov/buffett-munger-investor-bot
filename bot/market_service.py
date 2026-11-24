@@ -238,6 +238,7 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
 
     # Build year-indexed maps
     rev_by_yr = dict(revs)
+    gp_by_yr = dict(gross_profits)
     op_by_yr = dict(op_incomes)
     tax_by_yr = dict(tax_rates)
     ni_by_yr = dict(net_incomes)
@@ -245,10 +246,11 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
     eq_by_yr = dict(equities)
     cash_by_yr = dict(cashes)
 
-    # 1. Multi-year ROIC (or ROE for Banks/Insurers)
+    # 1. Multi-year ROIC (or ROE for Banks/Insurers) & Gross Margin Stability ("Prayer Session" Test)
     roic_vals: list[float] = []
     roe_vals: list[float] = []
     op_margin_vals: list[float] = []
+    gross_margin_vals: list[float] = []
     years_scanned: list[str] = []
 
     for yr in sorted(set(ni_by_yr.keys()) | set(op_by_yr.keys()), reverse=True)[:5]:
@@ -262,6 +264,9 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         op_inc = op_by_yr.get(yr)
         if rev and rev > 0 and op_inc is not None:
             op_margin_vals.append(round((op_inc / rev) * 100.0, 1))
+        gp_y = gp_by_yr.get(yr)
+        if rev and rev > 0 and gp_y is not None:
+            gross_margin_vals.append(round((gp_y / rev) * 100.0, 1))
 
         if not is_bank_or_insurer and op_inc is not None and eq > 0:
             tr = tax_by_yr.get(yr, 0.21)
@@ -373,6 +378,28 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         and (eff_roic_or_roe is None or eff_roic_or_roe >= 13.0)
     )
 
+    # v1.4.0: Munger's "Bullshit Earnings" (EBITDA Illusion %) & Buffett's "Prayer Session" Gross-Margin Test
+    gross_margin_avg_pct = round(sum(gross_margin_vals) / len(gross_margin_vals), 1) if gross_margin_vals else None
+    gross_margin_delta_pct = None
+    if len(gross_margin_vals) >= 3:
+        prior_gm_avg = sum(gross_margin_vals[1:]) / len(gross_margin_vals[1:])
+        gross_margin_delta_pct = round(gross_margin_vals[0] - prior_gm_avg, 1)
+
+    prayer_session_pricing_power = bool(
+        not is_bank_or_insurer
+        and gross_margin_avg_pct is not None
+        and gross_margin_avg_pct >= 48.0
+        and (gross_margin_delta_pct is None or gross_margin_delta_pct >= -1.2)
+        and (avg_roic_pct or 0) >= 15.0
+    )
+
+    ebitda_ref = float(info_m.get("ebitda") or 0.0)
+    if ebitda_ref <= 0 and latest_ebit is not None:
+        ebitda_ref = float(latest_ebit + latest_da)
+    ebitda_illusion_pct = None
+    if not is_bank_or_insurer and ebitda_ref > 0 and true_oe is not None:
+        ebitda_illusion_pct = round(max(0.0, min(100.0, ((ebitda_ref - true_oe) / ebitda_ref) * 100.0)), 1)
+
     latest_goodwill = abs(goodwills[0][1]) if goodwills else 0.0
     latest_equity = equities[0][1] if equities else 0.0
     goodwill_pct_of_equity = (
@@ -460,6 +487,10 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
             red_flags.append({"code": "inv_bloat", "val": round(inv_yoy_pct - rev_yoy_pct, 1)})
         if goodwill_pct_of_equity is not None and goodwill_pct_of_equity >= 45.0 and (avg_roic_pct is not None and avg_roic_pct < 11.0):
             red_flags.append({"code": "fake_goodwill", "val": goodwill_pct_of_equity})
+        if ebitda_illusion_pct is not None and ebitda_illusion_pct >= 55.0:
+            red_flags.append({"code": "ebitda_illusion", "val": ebitda_illusion_pct})
+        if gross_margin_delta_pct is not None and gross_margin_delta_pct <= -3.5:
+            red_flags.append({"code": "gross_margin_squeeze", "val": gross_margin_delta_pct})
 
     if share_change_pct is not None and share_change_pct >= 5.0:
         red_flags.append({"code": "dilution", "val": share_change_pct})
@@ -535,6 +566,10 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         "negative_working_capital": negative_working_capital,
         "rd_pct_of_rev": rd_pct_of_rev,
         "whole_business_payback_yrs": whole_business_payback_yrs,
+        "gross_margin_avg_pct": gross_margin_avg_pct,
+        "gross_margin_delta_pct": gross_margin_delta_pct,
+        "prayer_session_pricing_power": prayer_session_pricing_power,
+        "ebitda_illusion_pct": ebitda_illusion_pct,
         "interest_coverage_x": interest_coverage_x,
         "stress_test_pass": stress_test_pass,
         "stress_ebit_margin_pct": stress_ebit_margin_pct,

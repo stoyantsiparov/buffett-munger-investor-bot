@@ -17,6 +17,7 @@ from bot.market_service import fetch_deep_historical_metrics, fetch_stock_fundam
 from bot.models import PortfolioSnapshot, User, UserLoan, WatchlistItem
 from bot.news_service import fetch_live_ticker_news, format_news_context_for_ai
 from bot.playbooks import (
+    THEMATIC_PLAYBOOKS,
     build_stock_playbook_prompt_context,
     classify_industry_playbook,
     evaluate_industry_playbook_checks,
@@ -1338,6 +1339,18 @@ def format_deep_audit_lines(deep: dict | None, sym: str, lang: str = "en") -> li
                     if is_bg
                     else f"🚩 Fails Buffett's $1 Retained Earnings Test (ROIIC `{val:+.1f}%`)"
                 )
+            elif code == "ebitda_illusion":
+                flag_texts.append(
+                    f"🚩 Илюзия на EBITDA („Bullshit Earnings“ по Мънгър — `{val:.0f}%` от EBITDA отиват за CapEx и SBC)"
+                    if is_bg
+                    else f"🚩 Munger 'Bullshit Earnings' Alert (`{val:.0f}%` of EBITDA consumed by Maintenance CapEx & SBC)"
+                )
+            elif code == "gross_margin_squeeze":
+                flag_texts.append(
+                    f"🚩 Свиване на брутния марж (`{val:+.1f} п.п.` — риск тип Kraft Heinz срещу Costco Kirkland)"
+                    if is_bg
+                    else f"🚩 Gross-Margin Squeeze (`{val:+.1f} pts` — Kraft Heinz vs. Kirkland private-label pressure)"
+                )
         lines.extend([f"  {ft}" for ft in flag_texts])
     else:
         lines.append(
@@ -1519,6 +1532,190 @@ def analyze_stock_with_buffett(
             )
 
     return "\n".join(header_lines)
+
+
+def analyze_stock_with_munger_checklist(
+    metrics: dict,
+    watch_item: WatchlistItem | None = None,
+    user: User | None = None,
+    latest_snap: PortfolioSnapshot | None = None,
+    session: Session | None = None,
+    deep_metrics: dict | None = None,
+) -> str:
+    """Produce Charlie Munger's Two-Track Analysis & 12-Point Aviation Pre-Buy Checklist (/munger TICKER)."""
+    lang = get_lang(user)
+    is_bg = lang == "bg"
+    deep = deep_metrics or {}
+    cur = metrics.get("currency", "USD")
+    sym = "$" if cur == "USD" else ("p " if cur == "GBX" else ("€" if cur == "EUR" else f"{cur} "))
+    price = metrics.get("price") or (watch_item.last_price if watch_item else None) or 0.0
+    score = compute_quantitative_buffett_scorecard(metrics, watch_item, lang=lang)
+    pb_info = evaluate_industry_playbook_checks(metrics, deep, lang=lang)
+
+    is_fin = bool(deep.get("is_bank_or_insurer"))
+    avg_roic = deep.get("avg_roic_pct") or metrics.get("roic_est_pct")
+    avg_roe = deep.get("avg_roe_pct") or metrics.get("roe_pct")
+    eff_ret = avg_roe if is_fin else (avg_roic if avg_roic is not None else avg_roe)
+    gm_avg = deep.get("gross_margin_avg_pct") or metrics.get("gross_margin_pct")
+    gm_delta = deep.get("gross_margin_delta_pct")
+    ebitda_ill = deep.get("ebitda_illusion_pct")
+    sbc_pct = deep.get("sbc_pct_of_ocf")
+    share_chg = deep.get("share_change_pct")
+    payback = deep.get("whole_business_payback_yrs")
+    roiic = deep.get("roiic_pct")
+    dollar_pass = deep.get("passes_one_dollar_test")
+    stress_pass = deep.get("stress_test_pass")
+    int_cov = deep.get("interest_coverage_x")
+    nd_ebitda = metrics.get("net_debt_to_ebitda")
+    flags = deep.get("red_flags") or []
+
+    # Score the 12-point Munger Aviation Gatekeeper Checklist deterministically
+    c1_pass = pb_info["playbook_key"] != "cautionary_cyclicals"
+    c2_pass = len(flags) == 0
+    c3_pass = (eff_ret or 0) >= 15.0
+    c4_pass = is_fin or bool(deep.get("prayer_session_pricing_power")) or ((gm_avg or 0) >= 40.0 and (gm_delta is None or gm_delta >= -2.0))
+    c5_pass = is_fin or ((ebitda_ill is None or ebitda_ill < 50.0) and (sbc_pct is None or sbc_pct < 20.0))
+    c6_pass = (eff_ret or 0) >= 15.0 and (dollar_pass is not False)
+    c7_pass = (share_chg is None or share_chg <= 2.0)
+    c8_pass = is_fin or ((stress_pass is not False) and (int_cov is None or int_cov >= 5.0) and (nd_ebitda is None or nd_ebitda < 2.0))
+    c9_pass = not any(f["code"] in ("ar_bloat", "inv_bloat", "fake_goodwill", "accounting_gain") for f in flags)
+    c10_pass = (payback is None or payback <= 25.0) and (price <= score["iv_high"])
+    c11_pass = price <= score["target_buy"]
+
+    has_high_apr_debt = False
+    buf_missing = 0.0
+    if user:
+        buf_missing = max(0.0, float(user.emergency_buffer_target or 0) - float(user.emergency_buffer_current or 0))
+    is_chip = metrics["ticker"].upper() in SEMICONDUCTOR_SHORT_TICKERS
+    semi_pct = float(latest_snap.semiconductor_pct) if latest_snap else 0.0
+    c12_pass = (buf_missing <= 0) and not (is_chip and semi_pct >= 20.0)
+
+    passed_count = sum([c1_pass, c2_pass, c3_pass, c4_pass, c5_pass, c6_pass, c7_pass, c8_pass, c9_pass, c10_pass, c11_pass, c12_pass])
+
+    if is_bg:
+        lines = [
+            f"🦅 *ЧАРЛИ МЪНГЪР: ДВУПИСТОВ АНАЛИЗ & 12-ТОЧКОВ ЧЕКЛИСТ ({metrics['ticker']})*",
+            f"📘 *Плейбук:* {pb_info['title']} | *Резултат:* `{passed_count}/12` контролни точки",
+            "",
+            "⚙️ *ПИСТА 1 — Микроикономика, Мащаб & Истински Owner Earnings:*",
+            f"  {'✅' if c1_pass else '⚠️'} *1. Кръг на компетентност & Скорост на промяна:* {pb_info['model_type']}",
+            f"  {'✅' if c2_pass else '🚩'} *2. Инверсия на Мънгър (Детектор за провал):* {f'{len(flags)} червени флага' if flags else '0 счетоводни/SBC червени флага'}",
+            f"  {'✅' if c3_pass else '⚠️'} *3. 5-те предимства на мащаба & 40-г. ROIC конвергенция:* `{eff_ret if eff_ret is not None else 'N/A'}%` (цел >= 15%)",
+            f"  {'✅' if c4_pass else '⚠️'} *4. Ценова сила без „молитвена сесия“ (Kraft vs. Kirkland):* Брутен марж `{gm_avg if gm_avg is not None else 'N/A'}%` ({f'{gm_delta:+.1f} п.п. тренд' if gm_delta is not None else 'стабилен'})",
+            f"  {'✅' if c5_pass else '🚩'} *5. Истински Owner Earnings срещу „Bullshit Earnings“ (EBITDA):* "
+            + (
+                "Банков/Застрахователен модел"
+                if is_fin
+                else f"EBITDA илюзия `{ebitda_ill if ebitda_ill is not None else 0:.0f}%` | SBC `{sbc_pct if sbc_pct is not None else 0:.1f}%` от OCF"
+            ),
+            f"  {'✅' if c6_pass else '⚠️'} *6. Тест за $1 задържана печалба (ROIIC):* `{f'{roiic:+.1f}%' if roiic is not None else 'N/A'}`",
+            f"  {'✅' if c7_pass else '🚩'} *7. „Канибалски“ Buybacks & Оборотен капитал:* Акции `{f'{share_chg:+.1f}%' if share_chg is not None else 'N/A'}`"
+            + (" (🦈 Канибал)" if deep.get("is_cannibal") else "")
+            + (" | 🔄 Отрицателен обор. капитал" if deep.get("negative_working_capital") else ""),
+            f"  {'✅' if c8_pass else '🚩'} *8. Крепостен баланс & Стрес тест (−30% приходи):* "
+            + (
+                f"Лихвено покритие `{int_cov if int_cov is not None else 'N/A'}x` | Стрес EBIT `{deep.get('stress_ebit_margin_pct')}%`"
+                if not is_fin
+                else "Финансова институция (следи CET1 > 10% / Combined Ratio < 100%)"
+            ),
+            f"  {'✅' if c9_pass else '🚩'} *9. Хигиена на счетоводството (Mark-to-Myth тест):* "
+            + ("Чисти отчети (A/R, Запаси и Goodwill в норма)" if c9_pass else "Открито отклонение в A/R, Запаси или Goodwill!"),
+            f"  {'✅' if c10_pass else '⚠️'} *10. Формула на Езоп (Изплащане на 100% от бизнеса):* `~{payback if payback is not None else 'N/A'} г.` чрез Истински Owner Earnings",
+            "",
+            "🧠 *ПИСТА 2 — Психология на човешките грешки (25-те капана от Харвард 1995):*",
+            f"  {'✅' if c11_pass else '⏳'} *11. Контрастен капан & Марж на безопасност:* Цена `{sym}{price:,.2f}` срещу Target Buy `<= {sym}{score['target_buy']:,.2f}` (IV `{sym}{score['iv_low']:,.0f}–{sym}{score['iv_high']:,.0f}`)",
+            f"  {'✅' if c12_pass else '🛡️'} *12. Лична капитална дисциплина (Буфер, Кредит & Секторен таван):* "
+            + (
+                f"Буфер липсват `€{buf_missing:.0f}` | Чипове `{semi_pct:.1f}%` (таван 20–25%)"
+                if not c12_pass
+                else "Буфер и секторни лимити са в норма"
+            ),
+        ]
+    else:
+        lines = [
+            f"🦅 *CHARLIE MUNGER: TWO-TRACK ANALYSIS & 12-POINT CHECKLIST ({metrics['ticker']})*",
+            f"📘 *Playbook:* {pb_info['title']} | *Score:* `{passed_count}/12` gatekeeper checks",
+            "",
+            "⚙️ *TRACK 1 — Microeconomics, Scale & True Owner Earnings:*",
+            f"  {'✅' if c1_pass else '⚠️'} *1. Circle of Competence & Rate of Change:* {pb_info['model_type']}",
+            f"  {'✅' if c2_pass else '🚩'} *2. Munger's Inversion (Failure Detector):* {f'{len(flags)} red flags' if flags else '0 accounting/SBC red flags'}",
+            f"  {'✅' if c3_pass else '⚠️'} *3. 5 Scale Advantages & 40-Yr ROIC Convergence:* `{eff_ret if eff_ret is not None else 'N/A'}%` (target >= 15%)",
+            f"  {'✅' if c4_pass else '⚠️'} *4. 'Prayer Session' Pricing Power (Kraft vs. Kirkland):* Gross margin `{gm_avg if gm_avg is not None else 'N/A'}%` ({f'{gm_delta:+.1f} pts trend' if gm_delta is not None else 'stable'})",
+            f"  {'✅' if c5_pass else '🚩'} *5. True Owner Earnings vs. 'Bullshit Earnings' (EBITDA):* "
+            + (
+                "Bank/Insurance Balance-Sheet Model"
+                if is_fin
+                else f"EBITDA illusion `{ebitda_ill if ebitda_ill is not None else 0:.0f}%` | SBC `{sbc_pct if sbc_pct is not None else 0:.1f}%` of OCF"
+            ),
+            f"  {'✅' if c6_pass else '⚠️'} *6. Buffett $1 Retained Earnings Test (ROIIC):* `{f'{roiic:+.1f}%' if roiic is not None else 'N/A'}`",
+            f"  {'✅' if c7_pass else '🚩'} *7. 'Cannibal' Buybacks & Working Capital:* Shares `{f'{share_chg:+.1f}%' if share_chg is not None else 'N/A'}`"
+            + (" (🦈 Cannibal)" if deep.get("is_cannibal") else "")
+            + (" | 🔄 Negative Working Capital" if deep.get("negative_working_capital") else ""),
+            f"  {'✅' if c8_pass else '🚩'} *8. Fortress Balance Sheet & −30% Stress Test:* "
+            + (
+                f"Interest cov `{int_cov if int_cov is not None else 'N/A'}x` | Stressed EBIT `{deep.get('stress_ebit_margin_pct')}%`"
+                if not is_fin
+                else "Financial institution (track CET1 > 10% / Combined Ratio < 100%)"
+            ),
+            f"  {'✅' if c9_pass else '🚩'} *9. Accounting Hygiene ('Mark-to-Myth' Check):* "
+            + ("Clean GAAP conversion (A/R, Inventory & Goodwill healthy)" if c9_pass else "Flagged divergence in A/R, Inventory, or Goodwill!"),
+            f"  {'✅' if c10_pass else '⚠️'} *10. Aesop's Whole-Business Payback Test:* `~{payback if payback is not None else 'N/A'} yrs` of True Owner Earnings",
+            "",
+            "🧠 *TRACK 2 — Psychology of Human Misjudgment (25 Harvard Biases):*",
+            f"  {'✅' if c11_pass else '⏳'} *11. Contrast-Misreaction & Margin of Safety:* Price `{sym}{price:,.2f}` vs Target Buy `<= {sym}{score['target_buy']:,.2f}` (IV `{sym}{score['iv_low']:,.0f}–{sym}{score['iv_high']:,.0f}`)",
+            f"  {'✅' if c12_pass else '🛡️'} *12. Personal Capital Discipline (Buffer, Debt & Sector Cap):* "
+            + (
+                f"Buffer missing `€{buf_missing:.0f}` | Chips `{semi_pct:.1f}%` (cap 20–25%)"
+                if not c12_pass
+                else "Buffer & sector limits healthy"
+            ),
+        ]
+
+    gemini_key = _get_gemini_api_key(user=user, session=session)
+    if gemini_key:
+        try:
+            munger_pb = (
+                THEMATIC_PLAYBOOKS["press_conference_masterclass_09"]["bg" if is_bg else "en"]
+                + "\n"
+                + THEMATIC_PLAYBOOKS["munger_psychology_checklist_10"]["bg" if is_bg else "en"]
+            )
+            prompt = (
+                f"Ти си Чарли Мънгър. Анализирай {metrics['ticker']} ({metrics['name']}) по Двупистовия анализ и Правилото на Дарвин.\n"
+                f"Данни: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"4-г. одит: {json.dumps(deep, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"{munger_pb}\n"
+                "Дай остър, прям коментар в стила на Чарли Мънгър в 3 кратки точки (до 950 знака):\n"
+                "1) Кои от 5-те предимства на мащаба или Ефект Лолапалуза работят за компанията (и има ли „Bullshit Earnings“ / SBC илюзия);\n"
+                "2) Правилото на Дарвин (30-минутният контра-аргумент: най-силната меча теза и психологическите капани от 25-те тенденции);\n"
+                "3) Финална присъда по Перфокартата с 20 дупки (струва ли си 1 дупка на текущата цена)."
+                if is_bg
+                else f"You are Charlie Munger. Analyze {metrics['ticker']} ({metrics['name']}) using Two-Track Analysis and Darwin's 30-Minute Rule.\n"
+                f"Metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"4-yr audit: {json.dumps(deep, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"{munger_pb}\n"
+                "Write a razor-sharp Charlie Munger verdict in 3 concise points (under 950 chars):\n"
+                "1) Which of the 5 Scale Advantages or Lollapalooza forces apply (and any 'Bullshit Earnings' EBITDA/SBC illusion);\n"
+                "2) Darwin's 30-Minute Counter-Thesis (strongest bear case & which of the 25 psychological biases could trap buyers here);\n"
+                "3) 20-Slot Lifetime Punch Card Verdict (is it worth 1 punch at today's price?)."
+            )
+            ai_text = _call_gemini_with_fallback(
+                gemini_key,
+                load_buffett_system_instruction(lang=lang),
+                prompt,
+            )
+            if ai_text:
+                lines.extend([
+                    "",
+                    "🦅 *Коментар на Чарли Мънгър (Правилото на Дарвин & 25-те капана):*"
+                    if is_bg
+                    else "🦅 *Charlie Munger's Verdict (Darwin's Rule & 25 Biases):*",
+                    ai_text,
+                ])
+        except Exception as e:
+            friendly = _format_friendly_ai_error(e, is_bg)
+            lines.append(f"\n_(ℹ️ {friendly})_")
+
+    return "\n".join(lines)
 
 
 def ask_buffett_agent(

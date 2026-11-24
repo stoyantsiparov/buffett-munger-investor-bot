@@ -390,6 +390,40 @@ THEMATIC_PLAYBOOKS: dict[str, dict[str, str]] = {
             "Търси Ефекта Лолапалуза (3–4 сили в една посока) и данъчния ефект „Рип Ван Уинкъл“ (0% данък за UCITS ETF в България)."
         ),
     },
+    "press_conference_masterclass_09": {
+        "en": (
+            "[Ref 09 - Top 30 AGM Press Conferences (1994-2026), UF 1998 & USC 1994 Masterclass]: "
+            "Apply: (1) Munger's 5 Scale Advantages (Geometry, Experience Curve, Informational/Brand like Wrigley's gum, Social Proof, Winner-Take-All Network) vs. 'Competitive Destruction' (autos/airlines/TVs); "
+            "(2) Buffett's 'Prayer Session' Pricing Power Test & Kraft Heinz vs. Costco Kirkland lesson (concentrated retailers/private labels can squeeze legacy brands with high M&A goodwill); "
+            "(3) Munger's 40-Year ROIC Convergence Law (long-term stock return converges to business ROIC/ROE — an 18% ROIC compounder beats a cheap 6% ROIC cigar butt); "
+            "(4) Interest Rates as Financial Gravity & 'Important vs. Knowable' (ignore unknowable macro; focus 100% on knowable microeconomics; only ~5 really juicy crisis years in 60); "
+            "(5) Munger's EBITDA = 'Bullshit Earnings' & 'Mark-to-Myth' Accounting Filter."
+        ),
+        "bg": (
+            "[Реф. 09 - Топ 30 AGM Пресконференции (1994–2026), UF 1998 & USC 1994 Мастърклас]: "
+            "Приложи: (1) 5-те предимства на мащаба по Мънгър (Геометрия, Крива на опита, Информационен/Бранд мащаб като дъвките Wrigley, Социално доказателство, Мрежов монопол) срещу „Конкурентното самоунищожение“; "
+            "(2) Тестът за ценова сила без „молитвена сесия“ и урокът Kraft Heinz срещу Costco Kirkland (частните марки на ритейл гигантите мачкат стари брандове с раздут Goodwill); "
+            "(3) Законът на Мънгър за 40-годишната конвергенция към ROIC (дългосрочната доходност на акцията се изравнява с ROIC на бизнеса — 18% ROIC винаги бие евтин 6% ROIC бизнес); "
+            "(4) Лихвите като финансова гравитация и „Важното срещу Познаваемото“ (игнорирай непознаваемото макро; само ~5 наистина сочни кризисни години на 60); "
+            "(5) EBITDA = „Bullshit Earnings“ (фалшива печалба преди CapEx и SBC) и „Mark-to-Myth“ счетоводството."
+        ),
+    },
+    "munger_psychology_checklist_10": {
+        "en": (
+            "[Ref 10 - Munger's Two-Track Analysis, 25 Cognitive Biases (1995 Harvard) & 12-Point Aviation Checklist]: "
+            "Run Two-Track Analysis: Track 1 (Microeconomics & True Owner Earnings) + Track 2 (25 Causes of Human Misjudgment: Incentive-Caused Bias [FedEx/Wells Fargo], "
+            "Inconsistency-Avoidance [Darwin's 30-Minute Counter-Thesis Rule], Envy vs Greed, Reciprocation [$300k board capture], Persian Messenger Syndrome [bad news must travel instantaneously], "
+            "Deprival-Superreaction [New Coke], Contrast-Misreaction [52-wk high anchoring], Vividness Bias, and Lollapalooza Critical Mass). "
+            "Enforce the 12-Point Pre-Buy Aviation Gatekeeper Checklist before committing capital."
+        ),
+        "bg": (
+            "[Реф. 10 - Двупистов анализ на Мънгър, 25 Психологически капана (Харвард 1995) & 12-точков авиационен чеклист]: "
+            "Приложи Двупистов анализ: Писта 1 (Микроикономика и Истински Owner Earnings) + Писта 2 (25-те причини за човешка грешка: Изкривяване от стимули [FedEx/Wells Fargo], "
+            "Отказ от промяна на мнението [Правилото на Дарвин за записване на контрааргументите до 30 мин.], Завист пред алчност, Синдром на персийския вестоносец [лошите новини трябва да стигат до върха мигновено], "
+            "Свръхреакция при отнемане [New Coke], Контрастен капан [котва към 52-седмичен връх] и Ефект Лолапалуза). "
+            "Провери 12-точковия предполетен чеклист преди всяка покупка."
+        ),
+    },
 }
 
 
@@ -554,6 +588,30 @@ def evaluate_industry_playbook_checks(
             else f"{pb_icon} *Whole-Business Payback Test (Aesop / Buffett):* 100% of Market Cap pays back in `~{payback_yrs:.1f} yrs` of True Owner Earnings"
         )
 
+    if deep.get("prayer_session_pricing_power"):
+        gm_avg = deep.get("gross_margin_avg_pct") or gross_m or 0.0
+        extra_notes.append(
+            f"👑 *Ценова сила без „молитвена сесия“ (Бъфет AGM):* Устойчив брутен марж (`~{gm_avg:.1f}%`) без ерозия от конкуренти"
+            if is_bg
+            else f"👑 *Unassailable Pricing Power (No 'Prayer Session' Needed):* Durable gross margin (`~{gm_avg:.1f}%`) without competitive erosion"
+        )
+
+    ebitda_ill = deep.get("ebitda_illusion_pct")
+    if ebitda_ill is not None and ebitda_ill >= 45.0:
+        extra_notes.append(
+            f"🐂 *Илюзията на EBITDA („Bullshit Earnings“ по Мънгър):* `{ebitda_ill:.0f}%` от EBITDA изчезват за поддържащ CapEx и SBC преди да стигнат до акционерите!"
+            if is_bg
+            else f"🐂 *Munger's 'Bullshit Earnings' (EBITDA Illusion):* `{ebitda_ill:.0f}%` of EBITDA vanishes into Maintenance CapEx & SBC before reaching owners!"
+        )
+
+    eff_conv = avg_roe if pb_key in ("banking", "insurance") else avg_roic
+    if eff_conv is not None and eff_conv >= 18.0:
+        extra_notes.append(
+            f"📐 *Закон на Мънгър за 40-г. конвергенция (USC 1994):* Дългосрочната възвръщаемост клони към високия ROIC/ROE (`~{eff_conv:.1f}%/год.`)"
+            if is_bg
+            else f"📐 *Munger's 40-Yr ROIC Convergence Law (1994 USC):* Long-term compounding converges toward its high ROIC/ROE (`~{eff_conv:.1f}%/yr`)"
+        )
+
     return {
         "playbook_key": pb_key,
         "title": pb["title_bg"] if is_bg else pb["title_en"],
@@ -608,7 +666,7 @@ def select_playbooks_for_question(
 
     if any(k in q for k in (
         "moat", "brand", "goodwill", "franchise", "commodity", "pricing power", "competit",
-        "ров", "бранд", "марка", "франчайз", "ценова сила", "конкурент", "предимство",
+        " ров", "рова", "бранд", "марка", "франчайз", "ценова сила", "конкурент", "предимство",
     )):
         selected.append(THEMATIC_PLAYBOOKS["moat_and_goodwill_03"][lang_key])
 
@@ -629,6 +687,18 @@ def select_playbooks_for_question(
         "пазар", "диверсиф", "концентрац", "кръг", "инверсия", "инфлация", "данък", "сложен процент", "търпение", "буфер", "кредит",
     )):
         selected.append(THEMATIC_PLAYBOOKS["philosophy_and_mental_01_02"][lang_key])
+
+    if any(k in q for k in (
+        "scale", "prayer", "kirkland", "kraft", "ltcm", "gravity", "treasury", "bullshit", "ebitda", "converg", "press", "agm", "casino",
+        "мащаб", "молитв", "гравитац", "облигац", "конвергенц", "пресконференц", "казино", "фалшив",
+    )):
+        selected.append(THEMATIC_PLAYBOOKS["press_conference_masterclass_09"][lang_key])
+
+    if any(k in q for k in (
+        "munger", "checklist", "bias", "psychol", "darwin", "lollapalooza", "incentive", "envy", "messenger", "misjudg",
+        "мънгър", "чеклист", "психолог", "дарвин", "лолапалуза", "стимул", "завист", "вестоносец", "грешк",
+    )):
+        selected.append(THEMATIC_PLAYBOOKS["munger_psychology_checklist_10"][lang_key])
 
     # 2) Route by explicit industry keywords in question + mentioned tickers' classified industries
     ind_keys: list[str] = list(mentioned_playbooks or [])
@@ -661,5 +731,5 @@ def select_playbooks_for_question(
         selected.append(THEMATIC_PLAYBOOKS["moat_and_goodwill_03"][lang_key])
         selected.append(THEMATIC_PLAYBOOKS["management_and_capital_04_06"][lang_key])
 
-    # Cap at 3 concise playbook blocks (~400-650 tokens total)
-    return "\n".join(selected[:3])
+    # Cap at 4 concise playbook blocks (~500-750 tokens total)
+    return "\n".join(selected[:4])
