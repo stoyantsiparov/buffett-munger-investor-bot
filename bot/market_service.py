@@ -6,6 +6,7 @@ import math
 import yfinance as yf
 from sqlalchemy.orm import Session
 from bot.models import WatchlistItem
+from bot.playbooks import PLAYBOOK_DEFAULT_SECTOR_INDUSTRY, classify_industry_playbook
 from bot.sec_edgar import fetch_sec_edgar_annual_series
 
 
@@ -40,8 +41,15 @@ def fetch_stock_fundamentals(ticker: str) -> dict:
     currency = currency or "USD"
 
     name = info.get("longName") or info.get("shortName") or clean_symbol
-    sector = info.get("sector", "N/A")
-    industry = info.get("industry", "N/A")
+    sector = info.get("sector") or "N/A"
+    industry = info.get("industry") or "N/A"
+    if sector == "N/A" or industry == "N/A":
+        pb_key = classify_industry_playbook(sector if sector != "N/A" else None, industry if industry != "N/A" else None, clean_symbol)
+        def_sec, def_ind = PLAYBOOK_DEFAULT_SECTOR_INDUSTRY.get(pb_key, ("N/A", "N/A"))
+        if sector == "N/A":
+            sector = def_sec
+        if industry == "N/A":
+            industry = def_ind
 
     market_cap = info.get("marketCap") or 0
     if not market_cap and fast:
@@ -501,6 +509,15 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
     if passes_one_dollar_test is False and roiic_pct is not None and roiic_pct < 0.0:
         red_flags.append({"code": "failed_dollar_test", "val": roiic_pct})
 
+    # v1.5.0: Paramount 2023 AGM Dividend-Slash Distress Detector (>=35% annual dividend cut)
+    dividend_cut_pct = None
+    if len(divs_paid) >= 2:
+        newest_div = abs(divs_paid[0][1])
+        prev_div = abs(divs_paid[1][1])
+        if prev_div > 1e6 and newest_div < prev_div * 0.65:
+            dividend_cut_pct = round(((newest_div - prev_div) / prev_div) * 100.0, 1)
+            red_flags.append({"code": "dividend_slash", "val": dividend_cut_pct})
+
     # 8. Cloud-IP Resilience Backfill: If Yahoo Finance rate-limited `t.info` on a shared cloud IP,
     # populate missing TTM fields in `info_metrics` directly from the latest annual GAAP statements!
     if info_metrics is not None:
@@ -570,6 +587,8 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         "gross_margin_delta_pct": gross_margin_delta_pct,
         "prayer_session_pricing_power": prayer_session_pricing_power,
         "ebitda_illusion_pct": ebitda_illusion_pct,
+        "dividend_cut_pct": dividend_cut_pct,
+        "lehman_10k_red_flags": len(red_flags),
         "interest_coverage_x": interest_coverage_x,
         "stress_test_pass": stress_test_pass,
         "stress_ebit_margin_pct": stress_ebit_margin_pct,

@@ -15,12 +15,33 @@ INSURANCE_TICKERS = {"BRK.B", "BRK-B", "BRK.A", "BRK-A", "CB", "PGR", "ALL", "TR
 CONSUMER_BRAND_TICKERS = {"KO", "PEP", "PG", "COST", "WMT", "MCD", "SBUX", "NKE", "CL", "MDLZ", "KHC", "CELH", "PM", "MO", "UL"}
 MEDIA_TICKERS = {"NFLX", "DIS", "SPOT", "TTWO", "EA", "RBLX", "WBD", "PARA", "NYT", "CMCSA", "LYV"}
 ENERGY_UTILITY_TICKERS = {"OXY", "CVX", "XOM", "COP", "SHEL", "TTE", "BP", "NEE", "DUK", "SO", "CEG", "VST", "CCJ", "ENB", "KMI"}
-RAIL_INDUSTRIAL_TICKERS = {"UNP", "CSX", "NSC", "CP", "CNI", "WM", "RSG", "CAT", "DE", "GE", "HON", "UPS", "FDX", "FIX", "NVT", "URI"}
+RAIL_INDUSTRIAL_TICKERS = {"UNP", "CSX", "NSC", "CP", "CNI", "WM", "RSG", "CAT", "DE", "GE", "HON", "UPS", "FDX", "FIX", "NVT", "URI", "RR.L", "PAR"}
 CAUTIONARY_TICKERS = {"DAL", "UAL", "AAL", "LUV", "RYAAY", "JBLU", "SAVE", "CCL", "NCLH"}
+TECH_TICKERS = {
+    "AAPL", "MSFT", "GOOGL", "GOOG", "META", "NVDA", "AVGO", "ASML", "TSM", "INTU",
+    "CRM", "ADBE", "ORCL", "IBM", "AMD", "INTC", "CRWD", "ANET", "CSCO", "NOW",
+    "SHOP", "UBER", "APP", "PLTR", "SNOW", "PANW", "AMZN", "TXN", "QCOM", "MU", "AMAT", "LRCX", "KLAC",
+}
+FINANCIAL_TOLL_TICKERS = {"V", "MA", "AXP", "MCO", "SPGI", "FDS", "ICE", "CME", "MSCI", "NDAQ", "BLK", "BX", "KKR", "ADP"}
+HEALTHCARE_TICKERS = {"UNH", "JNJ", "LLY", "ABBV", "MRK", "PFE", "TMO", "DHR", "ISRG", "VRTX", "REGN", "AMGN", "GILD", "BMY", "NVO"}
+
+PLAYBOOK_DEFAULT_SECTOR_INDUSTRY: dict[str, tuple[str, str]] = {
+    "insurance": ("Financial Services", "Insurance - Property & Casualty"),
+    "banking": ("Financial Services", "Banks - Diversified"),
+    "consumer_brands": ("Consumer Defensive", "Consumer Brands & Retail"),
+    "technology": ("Technology", "Software & Technology Infrastructure"),
+    "media_entertainment": ("Communication Services", "Media & Entertainment"),
+    "energy_utilities": ("Energy & Utilities", "Oil, Gas & Regulated Utilities"),
+    "railroads_industrials": ("Industrials", "Railroads & Heavy Industrials"),
+    "cautionary_cyclicals": ("Industrials", "Airlines & Cyclical Commodities"),
+    "financial_markets": ("Financial Services", "Financial Data, Exchanges & Payment Networks"),
+    "healthcare": ("Healthcare", "Healthcare & Pharmaceuticals"),
+    "general_franchise": ("Diversified", "Commercial Enterprise"),
+}
 
 
 def classify_industry_playbook(sector: str | None, industry: str | None, ticker: str | None = None) -> str:
-    """Classify a company into one of Buffett's 8 industry playbooks from 08-industry-playbooks.md."""
+    """Classify a company into one of Buffett's industry playbooks from 08-industry-playbooks.md."""
     tk = (ticker or "").strip().upper()
     sec = (sector or "").strip().lower()
     ind = (industry or "").strip().lower()
@@ -29,7 +50,9 @@ def classify_industry_playbook(sector: str | None, industry: str | None, ticker:
         return "insurance"
     if tk in BANK_TICKERS or "bank" in ind:
         return "banking"
-    if tk in CAUTIONARY_TICKERS or any(k in ind for k in ("airline", "textile", "apparel manufacturing", "paper", "steel", "aluminum")):
+    if tk in FINANCIAL_TOLL_TICKERS or any(k in ind for k in ("credit services", "financial data", "stock exchanges", "capital markets", "asset management")):
+        return "financial_markets"
+    if tk in CAUTIONARY_TICKERS or any(k in ind for k in ("airline", "textile", "apparel manufacturing", "paper", "steel", "aluminum", "auto manufacturers")):
         return "cautionary_cyclicals"
     if tk in RAIL_INDUSTRIAL_TICKERS or any(k in ind for k in ("rail", "freight", "trucking", "waste", "aerospace", "machinery", "industrial", "engineering", "construction")):
         return "railroads_industrials"
@@ -39,12 +62,12 @@ def classify_industry_playbook(sector: str | None, industry: str | None, ticker:
         return "media_entertainment"
     if tk in CONSUMER_BRAND_TICKERS or sec in ("consumer defensive", "consumer staples") or any(k in ind for k in ("beverage", "confection", "packaged foods", "household", "personal products", "tobacco", "restaurant", "retail", "discount stores", "apparel retail", "footwear", "grocery")):
         return "consumer_brands"
-    if sec in ("technology", "communication services") or any(k in ind for k in ("software", "semiconductor", "internet", "information technology", "computer", "cloud", "cyber", "electronics", "telecom")):
+    if tk in HEALTHCARE_TICKERS or sec == "healthcare" or any(k in ind for k in ("drug", "pharma", "biotech", "medical", "healthcare")):
+        return "healthcare"
+    if tk in TECH_TICKERS or sec in ("technology", "communication services") or any(k in ind for k in ("software", "semiconductor", "internet", "information technology", "computer", "cloud", "cyber", "electronics", "telecom")):
         return "technology"
     if sec == "financial services":
         return "financial_markets"
-    if sec == "healthcare":
-        return "healthcare"
     return "general_franchise"
 
 
@@ -392,36 +415,41 @@ THEMATIC_PLAYBOOKS: dict[str, dict[str, str]] = {
     },
     "press_conference_masterclass_09": {
         "en": (
-            "[Ref 09 - Top 30 AGM Press Conferences (1994-2026), UF 1998 & USC 1994 Masterclass]: "
+            "[Ref 09 - Top 30 AGM Press Conferences (1994-2026), Lehman/AIG 10-K Forensics & $1M Small-Cap Playbook]: "
             "Apply: (1) Munger's 5 Scale Advantages (Geometry, Experience Curve, Informational/Brand like Wrigley's gum, Social Proof, Winner-Take-All Network) vs. 'Competitive Destruction' (autos/airlines/TVs); "
-            "(2) Buffett's 'Prayer Session' Pricing Power Test & Kraft Heinz vs. Costco Kirkland lesson (concentrated retailers/private labels can squeeze legacy brands with high M&A goodwill); "
+            "(2) Buffett's 'Prayer Session' Pricing Power Test & Kraft Heinz vs. Costco Kirkland lesson (concentrated retailers/private labels squeeze legacy brands with high M&A goodwill); "
             "(3) Munger's 40-Year ROIC Convergence Law (long-term stock return converges to business ROIC/ROE — an 18% ROIC compounder beats a cheap 6% ROIC cigar butt); "
-            "(4) Interest Rates as Financial Gravity & 'Important vs. Knowable' (ignore unknowable macro; focus 100% on knowable microeconomics; only ~5 really juicy crisis years in 60); "
-            "(5) Munger's EBITDA = 'Bullshit Earnings' & 'Mark-to-Myth' Accounting Filter."
+            "(4) Lehman 2008 10-K Cover-Page Red-Flag Method & Dick Fuld 'Blaming Short Sellers' Tell + AIG Friday 8 PM / 300,000-Page CDO Complexity Filter (walk away in 5 seconds if balance sheet is opaque); "
+            "(5) Buffett's $1M / 50%-per-Year 20,000-Page Small-Cap Playbook (Green Bay & Western anomaly) & Munger's Two Rules of Fishing ('Fish where the fish are'); "
+            "(6) Anti-Deployment-Quota Rule ($335B+ T-bills, ~5 juicy crisis years in 60, Munger's 5-lifetime-decisions ideal, $574B retained-earnings engine) & EBITDA = 'Bullshit Earnings'."
         ),
         "bg": (
-            "[Реф. 09 - Топ 30 AGM Пресконференции (1994–2026), UF 1998 & USC 1994 Мастърклас]: "
-            "Приложи: (1) 5-те предимства на мащаба по Мънгър (Геометрия, Крива на опита, Информационен/Бранд мащаб като дъвките Wrigley, Социално доказателство, Мрежов монопол) срещу „Конкурентното самоунищожение“; "
-            "(2) Тестът за ценова сила без „молитвена сесия“ и урокът Kraft Heinz срещу Costco Kirkland (частните марки на ритейл гигантите мачкат стари брандове с раздут Goodwill); "
-            "(3) Законът на Мънгър за 40-годишната конвергенция към ROIC (дългосрочната доходност на акцията се изравнява с ROIC на бизнеса — 18% ROIC винаги бие евтин 6% ROIC бизнес); "
-            "(4) Лихвите като финансова гравитация и „Важното срещу Познаваемото“ (игнорирай непознаваемото макро; само ~5 наистина сочни кризисни години на 60); "
-            "(5) EBITDA = „Bullshit Earnings“ (фалшива печалба преди CapEx и SBC) и „Mark-to-Myth“ счетоводството."
+            "[Реф. 09 - Топ 30 AGM Пресконференции (1994–2026), Форензик одит на 10-K (Lehman/AIG) & Стратегията за 50%/год. с малък капитал]: "
+            "Приложи: (1) 5-те предимства на мащаба по Мънгър срещу „Конкурентното самоунищожение“ (автомобили/авиокомпании); "
+            "(2) Ценова сила без „молитвена сесия“ и урокът Kraft Heinz срещу Costco Kirkland; "
+            "(3) Законът на Мънгър за 40-годишната конвергенция към ROIC (18% ROIC винаги бие евтин 6% ROIC бизнес); "
+            "(4) Форензик методът на Бъфет от 2008 г. за Lehman Brothers (записване на страниците с червени флагове от 10-K директно на корицата; оправдания с „къси продавачи“ = веднага червен флаг) и правилото AIG/300,000 страници CDO (откажи за 5 секунди при непрозрачен баланс); "
+            "(5) Стратегията на Бъфет за 50%/год. с под $1M (прелистване на 20,000 малки компании за структурни аномалии като Green Bay & Western) и Двете правила на риболова на Мънгър („Лови риба там, където има риба“); "
+            "(6) Забрана за квоти за инвестиране ($335B+ в T-bills за ~5 сочни години на 60; идеалът на Мънгър за 5 велики решения в живота) и EBITDA = „Bullshit Earnings“."
         ),
     },
     "munger_psychology_checklist_10": {
         "en": (
-            "[Ref 10 - Munger's Two-Track Analysis, 25 Cognitive Biases (1995 Harvard) & 12-Point Aviation Checklist]: "
+            "[Ref 10 - Munger's Two-Track Analysis, 25 Harvard Biases, USC 2007 'Iron Prescription' & 12-Point Aviation Checklist]: "
             "Run Two-Track Analysis: Track 1 (Microeconomics & True Owner Earnings) + Track 2 (25 Causes of Human Misjudgment: Incentive-Caused Bias [FedEx/Wells Fargo], "
-            "Inconsistency-Avoidance [Darwin's 30-Minute Counter-Thesis Rule], Envy vs Greed, Reciprocation [$300k board capture], Persian Messenger Syndrome [bad news must travel instantaneously], "
-            "Deprival-Superreaction [New Coke], Contrast-Misreaction [52-wk high anchoring], Vividness Bias, and Lollapalooza Critical Mass). "
-            "Enforce the 12-Point Pre-Buy Aviation Gatekeeper Checklist before committing capital."
+            "Inconsistency-Avoidance [Darwin's 30-Minute Rule], Envy vs Greed, Reciprocation [$300k board capture], Persian Messenger Syndrome [bad news must travel instantaneously], "
+            "Deprival-Superreaction [New Coke], Contrast-Misreaction [52-wk high anchoring], and Lollapalooza Critical Mass). "
+            "Apply Munger's 2007 USC Law rules: (1) 'Iron Prescription' (you have no right to an opinion unless you can state the bear case better than your opponent); "
+            "(2) Planck Knowledge (true domain mastery) vs. Chauffeur Knowledge (PR script-readers); (3) IQ 130 thinking it's 120 vs. lethal IQ 150 thinking it's 170 (Scandinavian canoeists in 100%-fatality whirlpools); "
+            "(4) 'Tallest Building in Town' CEO Vanity Test & 'Vicious Horse' Banker Projection Filter; (5) 'Seamless Web of Deserved Trust' (avoid 47-page legalistic traps)."
         ),
         "bg": (
-            "[Реф. 10 - Двупистов анализ на Мънгър, 25 Психологически капана (Харвард 1995) & 12-точков авиационен чеклист]: "
-            "Приложи Двупистов анализ: Писта 1 (Микроикономика и Истински Owner Earnings) + Писта 2 (25-те причини за човешка грешка: Изкривяване от стимули [FedEx/Wells Fargo], "
-            "Отказ от промяна на мнението [Правилото на Дарвин за записване на контрааргументите до 30 мин.], Завист пред алчност, Синдром на персийския вестоносец [лошите новини трябва да стигат до върха мигновено], "
-            "Свръхреакция при отнемане [New Coke], Контрастен капан [котва към 52-седмичен връх] и Ефект Лолапалуза). "
-            "Провери 12-точковия предполетен чеклист преди всяка покупка."
+            "[Реф. 10 - Двупистов анализ на Мънгър, 25 Психологически капана, „Желязната рецепта“ (USC 2007) & 12-точков чеклист]: "
+            "Приложи Двупистов анализ: Писта 1 (Микроикономика и Истински Owner Earnings) + Писта 2 (25-те причини за човешка грешка: Изкривяване от стимули, "
+            "Правилото на Дарвин до 30 мин., Завист пред алчност, Синдром на персийския вестоносец, Контрастен капан и Ефект Лолапалуза). "
+            "Приложи правилата на Мънгър от USC 2007 и AGM 2023: (1) „Желязната рецепта“ (нямаш право на теза, ако не можеш да формулираш контрааргумента по-добре от опонента си); "
+            "(2) Знание на Планк (истинско разбиране) срещу Знание на шофьора (PR наизустяване); (3) IQ 130, мислещ се за 120, срещу смъртоносното IQ 150, мислещ се за 170 (скандинавските кануисти във водовъртежи със 100% смъртност); "
+            "(4) Тестът за суета на CEO-то („най-високата сграда в града“) и филтърът „Лошият кон“ срещу банкерски прогнози; (5) „Безшевна мрежа от заслужено доверие“."
         ),
     },
 }
@@ -612,6 +640,20 @@ def evaluate_industry_playbook_checks(
             else f"📐 *Munger's 40-Yr ROIC Convergence Law (1994 USC):* Long-term compounding converges toward its high ROIC/ROE (`~{eff_conv:.1f}%/yr`)"
         )
 
+    flag_cnt = len(deep.get("red_flags") or [])
+    if flag_cnt == 0:
+        extra_notes.append(
+            "📑 *Тест „Корицата на 10-K“ (Lehman 2008 форензик):* `0` червени страници на корицата на отчета"
+            if is_bg
+            else "📑 *Buffett's 10-K Cover-Page Test (Lehman 2008 forensics):* `0` red-flag pages on the 10-K cover"
+        )
+    elif flag_cnt >= 3:
+        extra_notes.append(
+            f"🚨 *Тест „Корицата на 10-K“ (Lehman 2008 форензик):* `{flag_cnt}` червени флага на корицата — правилото на Бъфет за 5-секундно отказване!"
+            if is_bg
+            else f"🚨 *Buffett's 10-K Cover-Page Test (Lehman 2008 forensics):* `{flag_cnt}` red flags on the cover — trigger 5-second hang-up rule!"
+        )
+
     return {
         "playbook_key": pb_key,
         "title": pb["title_bg"] if is_bg else pb["title_en"],
@@ -690,13 +732,15 @@ def select_playbooks_for_question(
 
     if any(k in q for k in (
         "scale", "prayer", "kirkland", "kraft", "ltcm", "gravity", "treasury", "bullshit", "ebitda", "converg", "press", "agm", "casino",
-        "мащаб", "молитв", "гравитац", "облигац", "конвергенц", "пресконференц", "казино", "фалшив",
+        "lehman", "aig", "10-k", "1 million", "50%", "fish", "quota",
+        "мащаб", "молитв", "гравитац", "облигац", "конвергенц", "пресконференц", "казино", "фалшив", "леман", "риболов", "1 милион", "квота",
     )):
         selected.append(THEMATIC_PLAYBOOKS["press_conference_masterclass_09"][lang_key])
 
     if any(k in q for k in (
         "munger", "checklist", "bias", "psychol", "darwin", "lollapalooza", "incentive", "envy", "messenger", "misjudg",
-        "мънгър", "чеклист", "психолог", "дарвин", "лолапалуза", "стимул", "завист", "вестоносец", "грешк",
+        "planck", "chauffeur", "iron prescription", "whirlpool", "trust", "vanity",
+        "мънгър", "чеклист", "психолог", "дарвин", "лолапалуза", "стимул", "завист", "вестоносец", "грешк", "планк", "шофьор", "доверие", "суета",
     )):
         selected.append(THEMATIC_PLAYBOOKS["munger_psychology_checklist_10"][lang_key])
 

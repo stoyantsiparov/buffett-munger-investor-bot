@@ -198,10 +198,10 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     if use_search:
         cascade.append(("gemini-4-hydrogen", True, "low", 30.0))
     cascade.extend([
-        ("gemini-3.8-flash", False, "minimal", 30.0),
+        ("gemini-3.8-flash", False, "low", 30.0),
+        ("gemini-3.5-flash-lite", False, "minimal", 22.0),
         ("gemma-4-26b-a4b-it", False, None, 25.0),
         ("gemma-4-31b-it", False, None, 25.0),
-        ("gemini-3.5-flash-lite", False, "minimal", 20.0),
     ])
 
     deadline = time.monotonic() + 55.0
@@ -1351,6 +1351,12 @@ def format_deep_audit_lines(deep: dict | None, sym: str, lang: str = "en") -> li
                     if is_bg
                     else f"🚩 Gross-Margin Squeeze (`{val:+.1f} pts` — Kraft Heinz vs. Kirkland private-label pressure)"
                 )
+            elif code == "dividend_slash":
+                flag_texts.append(
+                    f"🚩 Рязко орязване на дивидента (`{val:+.1f}%` YoY — сигнал тип Paramount 2023 за ерозия на рова!)"
+                    if is_bg
+                    else f"🚩 Severe Dividend Cut (`{val:+.1f}%` YoY — Paramount 2023 structural moat-erosion signal!)"
+                )
         lines.extend([f"  {ft}" for ft in flag_texts])
     else:
         lines.append(
@@ -1685,18 +1691,18 @@ def analyze_stock_with_munger_checklist(
                 f"4-г. одит: {json.dumps(deep, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"{munger_pb}\n"
                 "Дай остър, прям коментар в стила на Чарли Мънгър в 3 кратки точки (до 950 знака):\n"
-                "1) Кои от 5-те предимства на мащаба или Ефект Лолапалуза работят за компанията (и има ли „Bullshit Earnings“ / SBC илюзия);\n"
-                "2) Правилото на Дарвин (30-минутният контра-аргумент: най-силната меча теза и психологическите капани от 25-те тенденции);\n"
-                "3) Финална присъда по Перфокартата с 20 дупки (струва ли си 1 дупка на текущата цена)."
+                "1) Микроикономика, 5-те предимства на мащаба & Тест „Корицата на 10-K“ (Lehman 2008 / има ли „Bullshit Earnings“ или SBC илюзия);\n"
+                "2) „Желязната рецепта“ (USC 2007) & Правилото на Дарвин (формулирай най-силната меча теза по-добре от къс продавач + психологическите капани от 25-те тенденции);\n"
+                "3) Финална присъда по Перфокартата с 20 дупки и Идеала за 5 решения в живота (струва ли си покупка днес или затваряш за 5 секунди)."
                 if is_bg
-                else f"You are Charlie Munger. Analyze {metrics['ticker']} ({metrics['name']}) using Two-Track Analysis and Darwin's 30-Minute Rule.\n"
+                else f"You are Charlie Munger. Analyze {metrics['ticker']} ({metrics['name']}) using Two-Track Analysis, Lehman 10-K Forensics, and the 2007 USC 'Iron Prescription'.\n"
                 f"Metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"4-yr audit: {json.dumps(deep, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"{munger_pb}\n"
                 "Write a razor-sharp Charlie Munger verdict in 3 concise points (under 950 chars):\n"
-                "1) Which of the 5 Scale Advantages or Lollapalooza forces apply (and any 'Bullshit Earnings' EBITDA/SBC illusion);\n"
-                "2) Darwin's 30-Minute Counter-Thesis (strongest bear case & which of the 25 psychological biases could trap buyers here);\n"
-                "3) 20-Slot Lifetime Punch Card Verdict (is it worth 1 punch at today's price?)."
+                "1) Microeconomics, 5 Scale Advantages & Lehman 10-K Cover-Page Audit (any 'Bullshit Earnings' EBITDA/SBC illusion);\n"
+                "2) Munger's 2007 USC 'Iron Prescription' & Darwin's 30-Minute Rule (state the strongest bear case better than a short seller + which of the 25 psychological biases apply);\n"
+                "3) 20-Slot Punch Card & 5-Lifetime-Decisions Verdict (worth 1 punch at today's price, or 5-second hang-up?)."
             )
             ai_text = _call_gemini_with_fallback(
                 gemini_key,
