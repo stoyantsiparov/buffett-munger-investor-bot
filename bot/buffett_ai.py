@@ -184,7 +184,7 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     # Disable internal multi-minute 503 retry loops (attempts=1 -> max_retries=0)
     # so overloaded models (503/429) fail over in <1s, while healthy models get
     # enough time (25-30s) to finish generating without premature client timeouts.
-    http_opts_kwargs: dict = {"timeout": 30000}
+    http_opts_kwargs: dict = {"timeout": 18000}
     retry_cls = getattr(genai_types, "HttpRetryOptions", None)
     if retry_cls is not None:
         http_opts_kwargs["retry_options"] = retry_cls(attempts=1)
@@ -194,21 +194,22 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
     )
     use_search = os.environ.get("GEMINI_ENABLE_SEARCH", "").strip() == "1"
     # Tuple: (model_name, enable_search, thinking_level_or_none, per_attempt_timeout_sec)
+    # Put gemini-3.5-flash-lite first: fastest & most reliable (~3-4s latency on Free Tier)
     cascade: list[tuple[str, bool, str | None, float]] = []
     if use_search:
-        cascade.append(("gemini-4-hydrogen", True, "low", 30.0))
+        cascade.append(("gemini-4-hydrogen", True, "low", 18.0))
     cascade.extend([
-        ("gemini-3.8-flash", False, "low", 30.0),
-        ("gemini-3.5-flash-lite", False, "minimal", 22.0),
-        ("gemma-4-26b-a4b-it", False, None, 25.0),
-        ("gemma-4-31b-it", False, None, 25.0),
+        ("gemini-3.5-flash-lite", False, "minimal", 16.0),
+        ("gemini-3.8-flash", False, "low", 16.0),
+        ("gemma-4-26b-a4b-it", False, None, 15.0),
+        ("gemma-4-31b-it", False, None, 15.0),
     ])
 
     deadline = time.monotonic() + 55.0
     last_err: Exception | None = None
     for model_name, enable_search, thinking_lvl, attempt_timeout in cascade:
         remaining = deadline - time.monotonic()
-        if remaining < 5.0:
+        if remaining < 4.0:
             break
         try:
             gen_cfg: dict = {"max_output_tokens": 1200}
@@ -236,6 +237,29 @@ def _call_gemini_with_fallback(api_key: str, system_instruction: str, prompt: st
                 return txt
         except Exception as e:
             logger.warning("Gemini AI model=%s failed: %s", model_name, str(e)[:180])
+            last_err = e
+            continue
+
+    # Secondary fallback via classic models.generate_content if /interactions is overloaded (503)
+    for fallback_model in ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"):
+        remaining = deadline - time.monotonic()
+        if remaining < 4.0:
+            break
+        try:
+            resp = client.models.generate_content(
+                model=fallback_model,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    max_output_tokens=1200,
+                ),
+            )
+            txt = (getattr(resp, "text", None) or "").strip()
+            if txt:
+                logger.info("Gemini AI succeeded with generate_content fallback model=%s", fallback_model)
+                return txt
+        except Exception as e:
+            logger.warning("Gemini AI generate_content model=%s failed: %s", fallback_model, str(e)[:180])
             last_err = e
             continue
 
@@ -1810,7 +1834,15 @@ def ask_buffett_agent(
             # Also check recent chat history so follow-up questions keep context on previously discussed tickers!
             recent_turns = _get_recent_chat_turns(user.telegram_id)
             known_tickers = {x["ticker"] for x in unified.get("all_ranked") or []}
-            stop_words = {"ROE", "ROA", "ROIC", "OCF", "FCF", "CAPEX", "EBITDA", "GAAP", "SBC", "ETF", "UCITS", "USD", "EUR", "CGT", "APR", "TBI", "TOP", "BUY", "SELL", "MOS", "SEC", "DOJ"}
+            stop_words = {
+                "ROE", "ROA", "ROIC", "ROIIC", "OCF", "FCF", "CAPEX", "EBITDA", "EBIT",
+                "GAAP", "SBC", "ETF", "ETFS", "UCITS", "USD", "EUR", "BGN", "CGT", "APR",
+                "TBI", "TOP", "BUY", "SELL", "HOLD", "MOS", "SEC", "DOJ", "USC", "UGA",
+                "AGM", "CEO", "CFO", "CDO", "CDS", "HTM", "SVB", "RFP", "SAAS", "IPO",
+                "EPS", "TTM", "YOY", "CAGR", "NWC", "FAQ", "API",
+            }
+            if "lehman" in question.lower() or "2008" in question.lower():
+                stop_words.add("AIG")
             raw_tokens = re.findall(r"\b[A-Z]{2,5}(?:\.[A-Z])?\b", question.upper())
             mentioned = [tok for tok in raw_tokens if tok in known_tickers]
             if not mentioned:
