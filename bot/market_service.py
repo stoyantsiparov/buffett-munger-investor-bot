@@ -85,9 +85,9 @@ def fetch_stock_fundamentals(ticker: str) -> dict:
         "industry": industry,
         "price": float(price) if price is not None else None,
         "market_cap": float(market_cap),
-        "pe_trailing": float(pe_trailing) if pe_trailing is not None else None,
-        "pe_forward": float(pe_forward) if pe_forward is not None else None,
-        "price_to_book": float(price_to_book) if price_to_book is not None else None,
+        "pe_trailing": round(float(pe_trailing), 2) if pe_trailing is not None else None,
+        "pe_forward": round(float(pe_forward), 2) if pe_forward is not None else None,
+        "price_to_book": round(float(price_to_book), 2) if price_to_book is not None else None,
         "gross_margin_pct": round(gross_margins * 100, 2) if gross_margins is not None else None,
         "operating_margin_pct": round(operating_margins * 100, 2) if operating_margins is not None else None,
         "profit_margin_pct": round(profit_margins * 100, 2) if profit_margins is not None else None,
@@ -162,11 +162,15 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
     equities = _df_series(bs, ("Stockholders Equity", "Common Stock Equity"))
     cashes = _df_series(bs, ("Cash Cash Equivalents And Short Term Investments", "Cash And Cash Equivalents"))
     ord_shares = _df_series(bs, ("Ordinary Shares Number", "Share Issued"))
+    receivables = _df_series(bs, ("Accounts Receivable", "Receivables"))
+    inventories = _df_series(bs, ("Inventory",))
+    goodwills = _df_series(bs, ("Goodwill", "Goodwill And Other Intangible Assets"))
 
     ocfs = _df_series(cf, ("Operating Cash Flow", "Cash Flow From Continuing Operating Activities"))
     capexs = _df_series(cf, ("Capital Expenditure", "Capital Expenditure Reported"))
     das = _df_series(cf, ("Depreciation And Amortization", "Depreciation Amortization Depletion"))
     sbcs = _df_series(cf, ("Stock Based Compensation",))
+    divs_paid = _df_series(cf, ("Cash Dividends Paid", "Common Stock Dividend Paid"))
 
     # Build year-indexed maps
     rev_by_yr = dict(revs)
@@ -280,18 +284,98 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         prior_avg_margin = sum(op_margin_vals[1:]) / len(op_margin_vals[1:])
         margin_delta_pct = round(op_margin_vals[0] - prior_avg_margin, 1)
 
+    # 6b. (v1.2.0) CapEx Intensity (CapEx / D&A & CapEx / OCF), Accounting Goodwill %, A/R & Inventory Bloat, and $1 Retained Earnings Test
+    capex_to_da_ratio = round(latest_capex / latest_da, 2) if (latest_da > 0 and latest_capex > 0) else None
+    capex_pct_of_ocf = round((latest_capex / latest_ocf) * 100.0, 1) if (latest_ocf and latest_ocf > 0) else None
+    capex_pct_of_rev = round((latest_capex / latest_rev) * 100.0, 1) if (latest_rev and latest_rev > 0) else None
+
+    latest_goodwill = abs(goodwills[0][1]) if goodwills else 0.0
+    latest_equity = equities[0][1] if equities else 0.0
+    goodwill_pct_of_equity = (
+        round((latest_goodwill / latest_equity) * 100.0, 1)
+        if (latest_goodwill > 0 and latest_equity > 0)
+        else None
+    )
+
+    ar_yoy_pct = None
+    if len(receivables) >= 2 and receivables[1][1] > 0:
+        ar_yoy_pct = round(((receivables[0][1] - receivables[1][1]) / receivables[1][1]) * 100.0, 1)
+
+    inv_yoy_pct = None
+    if len(inventories) >= 2 and inventories[1][1] > 0:
+        inv_yoy_pct = round(((inventories[0][1] - inventories[1][1]) / inventories[1][1]) * 100.0, 1)
+
+    # Buffett $1 Retained Earnings / Incremental Return on Retained Capital (ROIIC) Test
+    div_by_yr = {yr: abs(val) for yr, val in divs_paid}
+    roiic_pct = None
+    passes_one_dollar_test = None
+    if len(years_scanned) >= 3:
+        newest_yr = years_scanned[0]
+        oldest_yr = years_scanned[-1]
+        cum_retained = 0.0
+        for yr in years_scanned[1:]:
+            ni_y = ni_by_yr.get(yr, 0.0)
+            div_y = div_by_yr.get(yr, 0.0)
+            if ni_y > div_y:
+                cum_retained += (ni_y - div_y)
+        if is_bank_or_insurer:
+            e_new = ni_by_yr.get(newest_yr)
+            e_old = ni_by_yr.get(oldest_yr)
+        else:
+            op_new = op_by_yr.get(newest_yr)
+            op_old = op_by_yr.get(oldest_yr)
+            e_new = op_new * 0.79 if op_new is not None else None
+            e_old = op_old * 0.79 if op_old is not None else None
+        if cum_retained > 0 and e_new is not None and e_old is not None:
+            raw_roiic = ((e_new - e_old) / cum_retained) * 100.0
+            roiic_pct = round(max(-100.0, min(200.0, raw_roiic)), 1)
+            eff_avg = avg_roe_pct if is_bank_or_insurer else avg_roic_pct
+            if roiic_pct >= 12.0 or ((eff_avg or 0) >= 18.0 and roiic_pct >= 5.0):
+                passes_one_dollar_test = True
+            elif roiic_pct < 5.0 and (eff_avg or 0) < 13.0:
+                passes_one_dollar_test = False
+
     # 7. Automated Buffett & Munger Red-Flag Detector (structured codes for EN/BG rendering)
     red_flags: list[dict] = []
     if not is_bank_or_insurer:
         if sbc_pct_of_ocf is not None and sbc_pct_of_ocf >= 20.0:
             red_flags.append({"code": "sbc_heavy", "val": sbc_pct_of_ocf})
-        if latest_ni is not None and latest_ocf is not None and latest_ocf > 0 and latest_ni > latest_ocf * 1.35:
+        ttm_cc = info_m.get("cash_conversion_pct")
+        if (
+            latest_ni is not None
+            and latest_ocf is not None
+            and latest_ocf > 0
+            and latest_ni > latest_ocf * 1.35
+            and (ttm_cc is None or ttm_cc < 85.0)
+        ):
             ratio = round((latest_ni / latest_ocf) * 100.0, 0)
             red_flags.append({"code": "accounting_gain", "val": ratio})
         if stress_test_pass is False:
             red_flags.append({"code": "stress_fail", "val": stress_ebit_margin_pct})
         if interest_coverage_x is not None and interest_coverage_x < 5.0:
             red_flags.append({"code": "low_interest_cov", "val": interest_coverage_x})
+        if (
+            ar_yoy_pct is not None
+            and rev_yoy_pct is not None
+            and latest_rev > 0
+            and receivables
+            and (receivables[0][1] / latest_rev) >= 0.08
+            and ar_yoy_pct >= 12.0
+            and (ar_yoy_pct - rev_yoy_pct) >= 15.0
+        ):
+            red_flags.append({"code": "ar_bloat", "val": round(ar_yoy_pct - rev_yoy_pct, 1)})
+        if (
+            inv_yoy_pct is not None
+            and rev_yoy_pct is not None
+            and latest_rev > 0
+            and inventories
+            and (inventories[0][1] / latest_rev) >= 0.06
+            and inv_yoy_pct >= 12.0
+            and (inv_yoy_pct - rev_yoy_pct) >= 15.0
+        ):
+            red_flags.append({"code": "inv_bloat", "val": round(inv_yoy_pct - rev_yoy_pct, 1)})
+        if goodwill_pct_of_equity is not None and goodwill_pct_of_equity >= 45.0 and (avg_roic_pct is not None and avg_roic_pct < 11.0):
+            red_flags.append({"code": "fake_goodwill", "val": goodwill_pct_of_equity})
 
     if share_change_pct is not None and share_change_pct >= 5.0:
         red_flags.append({"code": "dilution", "val": share_change_pct})
@@ -299,6 +383,8 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         red_flags.append({"code": "margin_erosion", "val": margin_delta_pct})
     if rev_yoy_pct is not None and rev_yoy_pct <= -5.0:
         red_flags.append({"code": "rev_decline", "val": rev_yoy_pct})
+    if passes_one_dollar_test is False and roiic_pct is not None and roiic_pct < 0.0:
+        red_flags.append({"code": "failed_dollar_test", "val": roiic_pct})
 
     return {
         "is_bank_or_insurer": is_bank_or_insurer,
@@ -322,6 +408,14 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         "rev_yoy_pct": rev_yoy_pct,
         "rev_cagr_pct": rev_cagr_pct,
         "margin_delta_pct": margin_delta_pct,
+        "capex_to_da_ratio": capex_to_da_ratio,
+        "capex_pct_of_ocf": capex_pct_of_ocf,
+        "capex_pct_of_rev": capex_pct_of_rev,
+        "goodwill_pct_of_equity": goodwill_pct_of_equity,
+        "ar_yoy_pct": ar_yoy_pct,
+        "inv_yoy_pct": inv_yoy_pct,
+        "roiic_pct": roiic_pct,
+        "passes_one_dollar_test": passes_one_dollar_test,
         "red_flags": red_flags,
     }
 

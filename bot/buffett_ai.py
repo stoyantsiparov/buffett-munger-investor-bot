@@ -15,6 +15,12 @@ from bot.crypto import decrypt_secret
 from bot.i18n import format_ordinal, get_lang, localize_moat
 from bot.market_service import fetch_deep_historical_metrics, fetch_stock_fundamentals
 from bot.models import PortfolioSnapshot, User, UserLoan, WatchlistItem
+from bot.playbooks import (
+    build_stock_playbook_prompt_context,
+    classify_industry_playbook,
+    evaluate_industry_playbook_checks,
+    select_playbooks_for_question,
+)
 from bot.t212_service import SEMICONDUCTOR_SHORT_TICKERS, parse_t212_snapshot
 
 BROAD_EU_ETFS = {"VWCE", "IWDA", "SXR8", "CSPX", "EUNL", "VUAA", "SPYI", "WEBN"}
@@ -1272,6 +1278,30 @@ def format_deep_audit_lines(deep: dict | None, sym: str, lang: str = "en") -> li
                     if is_bg
                     else f"🚩 Low Interest Coverage (`{val:.1f}x` < 5x)"
                 )
+            elif code == "ar_bloat":
+                flag_texts.append(
+                    f"🚩 Вземанията (A/R) растат с `+{val:.1f} п.п.` над приходите (провери качеството на приходите)"
+                    if is_bg
+                    else f"🚩 Receivables growing `+{val:.1f} pts` faster than revenue (check revenue recognition)"
+                )
+            elif code == "inv_bloat":
+                flag_texts.append(
+                    f"🚩 Запасите (Inventory) растат с `+{val:.1f} п.п.` над приходите (риск от залежаване)"
+                    if is_bg
+                    else f"🚩 Inventory growing `+{val:.1f} pts` faster than revenue (inventory bloat risk)"
+                )
+            elif code == "fake_goodwill":
+                flag_texts.append(
+                    f"🚩 Висок счетоводен Goodwill (`{val:.0f}%` от капитала) при нисък ROIC („капитализиран адреналин“)"
+                    if is_bg
+                    else f"🚩 Heavy M&A Goodwill (`{val:.0f}%` of equity) with low ROIC ('capitalized adrenaline')"
+                )
+            elif code == "failed_dollar_test":
+                flag_texts.append(
+                    f"🚩 Не издържа Теста за $1 задържана печалба (ROIIC `{val:+.1f}%`)"
+                    if is_bg
+                    else f"🚩 Fails Buffett's $1 Retained Earnings Test (ROIIC `{val:+.1f}%`)"
+                )
         lines.extend([f"  {ft}" for ft in flag_texts])
     else:
         lines.append(
@@ -1338,10 +1368,25 @@ def analyze_stock_with_buffett(
     sec_val_num = 3 if deep_lines else 2
     sec_ai_num = 4 if deep_lines else 3
 
+    # v1.2.0: Industry Playbook & Buffett Economic Model Classification (03 & 08)
+    pb_info = evaluate_industry_playbook_checks(metrics, deep_metrics, lang=lang)
+    header_lines.extend([
+        "",
+        f"📘 *Бъфет Плейбук:* *{pb_info['title']}*"
+        if is_bg
+        else f"📘 *Buffett Playbook:* *{pb_info['title']}*",
+        f"  • *Бизнес модел:* {pb_info['model_type']}"
+        if is_bg
+        else f"  • *Economic Model:* {pb_info['model_type']}",
+        f"  • {pb_info['badge']}",
+    ])
+    for enote in pb_info["extra_notes"]:
+        header_lines.append(f"  • {enote}")
+    header_lines.append(f"  💡 _{pb_info['lesson']}_")
+
     moat_text = localize_moat(metrics["ticker"], watch_item.moat_summary if watch_item else None, lang)
     if moat_text and moat_text not in ("Wide Economic Moat", "Широк конкурентен ров"):
         header_lines.extend([
-            "",
             f"🏰 *Конкурентен ров:* {moat_text}" if is_bg else f"🏰 *Economic Moat:* {moat_text}",
         ])
 
@@ -1381,21 +1426,24 @@ def analyze_stock_with_buffett(
                 if deep_metrics
                 else ""
             )
+            playbook_ctx = build_stock_playbook_prompt_context(metrics, deep_metrics, lang=lang)
             if is_bg:
                 prompt = (
                     f"Анализирай {metrics['ticker']} ({metrics['name']}) по Бъфет и Мънгър.\n"
                     f"TTM данни: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}\n"
                     f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
-                    "Дай стегнато обобщение в 4 точки (до 1100 знака), коментирайки и реалния многогодишен ROIC, SBC/buybacks и червените флагове:\n"
-                    "1) Вид и посока на рова; 2) Мениджмънт ($1 тест, SBC и buybacks); 3) Инверсия на Мънгър (Топ 2 риска); 4) Кога да продадем (4-те критерия)."
+                    f"Активни Бъфет плейбуци:\n{playbook_ctx}\n"
+                    "Дай стегнато обобщение в 4 точки (до 1100 знака), прилагайки точния индустриален плейбук, многогодишния ROIC, Теста за $1, SBC/buybacks и червените флагове:\n"
+                    "1) Франчайз/Ров (вид, посока и индустриална специфика); 2) Мениджмънт ($1 тест, SBC, buybacks и институционален императив); 3) Инверсия на Мънгър (Топ 2 риска); 4) Кога да продадем (4-те критерия)."
                 )
             else:
                 prompt = (
                     f"Analyze {metrics['ticker']} ({metrics['name']}) using Buffett & Munger's framework.\n"
                     f"TTM metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}\n"
                     f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
-                    "Write a crisp 4-part summary (under 1100 chars), incorporating multi-year ROIC, SBC/buybacks, stress test & any red flags:\n"
-                    "1) Moat type & direction; 2) Management ($1 test, SBC & buybacks); 3) Munger's Inversion (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
+                    f"Active Buffett Playbooks:\n{playbook_ctx}\n"
+                    "Write a crisp 4-part summary (under 1100 chars), applying the industry playbook, multi-year ROIC, $1 Retained Earnings Test, SBC/buybacks & any red flags:\n"
+                    "1) Franchise/Moat (type, trend & industry specifics); 2) Management ($1 test, SBC, buybacks & institutional imperative); 3) Munger's Inversion (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
                 )
             ai_text = _call_gemini_with_fallback(
                 gemini_key,
@@ -1503,25 +1551,33 @@ def ask_buffett_agent(
                 for x in unified["top3"]
             ]
 
-            # Auto-enrich with multi-year deep historical metrics for up to 2 known tickers mentioned in the question
+            # Auto-enrich with multi-year deep historical metrics & industry playbooks for up to 2 mentioned tickers
             known_tickers = {x["ticker"] for x in unified.get("all_ranked") or []}
-            mentioned = [
-                tok for tok in re.findall(r"\b[A-Z]{2,5}(?:\.[A-Z])?\b", question.upper())
-                if tok in known_tickers
-            ]
+            raw_tokens = re.findall(r"\b[A-Z]{2,5}(?:\.[A-Z])?\b", question.upper())
+            mentioned = [tok for tok in raw_tokens if tok in known_tickers]
+            if not mentioned:
+                stop_words = {"ROE", "ROA", "ROIC", "OCF", "FCF", "CAPEX", "EBITDA", "GAAP", "SBC", "ETF", "UCITS", "USD", "EUR", "CGT", "APR", "TBI", "TOP", "BUY", "SELL", "MOS"}
+                mentioned = [tok for tok in raw_tokens if tok not in stop_words][:2]
             deep_mentioned: dict[str, dict] = {}
+            mentioned_playbooks: list[str] = []
             for tk in list(dict.fromkeys(mentioned))[:2]:
                 try:
                     m_tk = fetch_stock_fundamentals(tk)
                     d_tk = fetch_deep_historical_metrics(tk, m_tk)
+                    pb_key = classify_industry_playbook(m_tk.get("sector"), m_tk.get("industry"), tk)
+                    mentioned_playbooks.append(pb_key)
                     if d_tk:
                         deep_mentioned[tk] = {
+                            "playbook": pb_key,
                             "avg_roic_pct": d_tk.get("avg_roic_pct"),
                             "avg_roe_pct": d_tk.get("avg_roe_pct"),
                             "true_oe_b": round(d_tk["true_owner_earnings"] / 1e9, 2) if d_tk.get("true_owner_earnings") is not None else None,
                             "sbc_pct_ocf": d_tk.get("sbc_pct_of_ocf"),
                             "share_chg_pct": d_tk.get("share_change_pct"),
                             "int_cov_x": d_tk.get("interest_coverage_x"),
+                            "capex_da_x": d_tk.get("capex_to_da_ratio"),
+                            "roiic_pct": d_tk.get("roiic_pct"),
+                            "dollar_test": d_tk.get("passes_one_dollar_test"),
                             "stress_pass": d_tk.get("stress_test_pass"),
                             "red_flags": d_tk.get("red_flags"),
                         }
@@ -1533,6 +1589,12 @@ def ask_buffett_agent(
                 if deep_mentioned
                 else ""
             )
+            routed_playbooks = select_playbooks_for_question(
+                question,
+                mentioned_playbooks=mentioned_playbooks,
+                lang=lang,
+            )
+            playbook_block = f"Routed Buffett Reference Playbooks:\n{routed_playbooks}\n" if routed_playbooks else ""
 
             full_prompt = (
                 f"User ({user.full_name}) question: {question}\n"
@@ -1542,10 +1604,11 @@ def ask_buffett_agent(
                 f"T212 Portfolio: {json.dumps(port_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"Unified Top 3 (Watchlist vs Portfolio): {json.dumps(unified_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"{deep_block}"
+                f"{playbook_block}"
                 + (
-                    "Отговори стегнато за Telegram на български (до 2400 знака), с конкретни числа и ясен избор дали да подсили позиция в портфейла или да добави нова от Watchlist."
+                    "Отговори стегнато за Telegram на български (до 2400 знака), с конкретни числа, прилагайки маршрутизираните Бъфет плейбуци и ясен избор дали да подсили позиция в портфейла или да добави нова от Watchlist."
                     if is_bg
-                    else "Answer concisely for Telegram in English (under 2400 chars), with exact numbers and a clear recommendation on whether to reinforce an existing holding or open a new Watchlist position."
+                    else "Answer concisely for Telegram in English (under 2400 chars), with exact numbers, applying the routed Buffett playbooks and giving a clear recommendation on whether to reinforce an existing holding or open a new Watchlist position."
                 )
             )
             ai_text = _call_gemini_with_fallback(
