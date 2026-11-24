@@ -306,83 +306,88 @@ INDUSTRY_PLAYBOOKS: dict[str, dict[str, str]] = {
 THEMATIC_PLAYBOOKS: dict[str, dict[str, str]] = {
     "sell_and_risk_07": {
         "en": (
-            "[Ref 07 - When to Sell, Value Traps & Behavioral Biases]: "
+            "[Ref 07 - When to Sell, Value Traps, Herb Stein's Law & Real Bond Math]: "
             "Check Buffett's 4 Sell Criteria item-by-item: "
-            "(1) Price severely exceeds Intrinsic Value (market offers an unrefusable premium); "
-            "(2) Moat is fundamentally & permanently destroyed (structural disruption, NOT temporary cyclical trouble); "
-            "(3) Management integrity / accounting fraud issue (AUTOMATIC IMMEDIATE SELL — never wait); "
-            "(4) A clearly superior opportunity with a much larger Margin of Safety exists (accounting for tax/friction cost). "
-            "NEVER sell just because price dropped, Mr. Market panicked, or macro forecasts look grim. "
-            "Counter sunk-cost fallacy ('If I owned 0 shares today, would I buy at this price?') and anchoring to purchase price."
+            "(1) Price severely exceeds Intrinsic Value (PetroChina exit at $275-300B vs $35-40B entry; beware 1964-1981 valuation compression where even great businesses deliver 0% for a decade if bought at extreme multiples); "
+            "(2) Moat is fundamentally & permanently destroyed (Paramount 2024 exit — admit mistake 100% and sell, NOT temporary cyclical trouble); "
+            "(3) Management integrity / accounting fraud issue (AUTOMATIC IMMEDIATE SELL); "
+            "(4) A clearly superior opportunity with a much larger Margin of Safety exists. "
+            "NEVER sell just because price dropped or Mr. Market panicked (160-Acre Farm Analogy). "
+            "Counter Sunk-Cost Fallacy ('If I owned 0 shares today, would I buy at this price?'). "
+            "Remember Real Bond Math: 3-4% long bonds after tax and 2-3% inflation yield ~0% real purchasing power; cash is strictly an emergency buffer and crisis option."
         ),
         "bg": (
-            "[Реф. 07 - Кога се продава, Стойностни капани & Психология]: "
+            "[Реф. 07 - Кога се продава, Стойностни капани, Закон на Хърб Стайн & Реална доходност]: "
             "Провери точка по точка 4-те критерия на Бъфет за продажба: "
-            "(1) Цената екстремно надхвърля Вътрешната стойност; "
-            "(2) Икономическият ров е фундаментално и трайно разрушен (структурна промяна, а НЕ временна трудност); "
+            "(1) Цената екстремно надхвърля Вътрешната стойност (като излизането от PetroChina на $275–300B след покупка на $35–40B; дори велик бизнес дава 0% доходност с години, ако е купен на екстремен мултипликатор като през 1964–1981 г.); "
+            "(2) Икономическият ров е фундаментално и трайно разрушен (като Paramount през 2024 г. — признаваш грешката и излизаш, за разлика от временна цикличност); "
             "(3) Проблем с почтеността на мениджмънта или счетоводна измама (НЕЗАБАВНА ПРОДАЖБА); "
-            "(4) Налична е драстично по-добра възможност с много по-голям Марж на безопасност (след отчитане на данъци/разходи). "
-            "НИКОГА не се продава само защото цената е паднала или Г-н Пазар паникьосва. Приложи теста срещу Sunk Cost: „Ако днес имах 0 акции, щях ли да купя на тази цена?“"
+            "(4) Налична е драстично по-добра възможност с много по-голям Марж на безопасност. "
+            "НИКОГА не се продава заради спад в цената (Аналогията със 160-акровата ферма и Г-н Пазар). Приложи Sunk Cost теста: „Ако днес имах 0 акции, щях ли да купя на тази цена?“ "
+            "Помни реалната математика на облигациите: 3–4% лихва след данъци и инфлация дава ~0% реална покупателна способност; кешът е само за буфер и кризи."
         ),
     },
     "moat_and_goodwill_03": {
         "en": (
-            "[Ref 03 - Moat, Franchise vs. Commodity & Economic Goodwill]: "
+            "[Ref 03 - Moat, Rate-of-Change Filter, Consumer Utility Gap & Economic Goodwill]: "
             "Evaluate the 5 moats (Intangibles/Brand, Low-Cost Producer, Switching Costs [NRR>120%], Network Effects, Efficient Scale) and trend (Widening/Stable/Narrowing). "
-            "Apply the Hypothetical Competitor Test ('Would I wrestle a grizzly bear rather than compete with Mrs. B?'). "
-            "Distinguish Economic Goodwill (high ROIC on net tangible assets -> best inflation hedge, like See's Candies) from Fake Accounting Goodwill ('capitalized adrenaline' from overpriced M&A with low ROIC)."
+            "Apply: (1) Rate-of-Change Filter (avoid industries with rapid unpredictable technological shifts; favor habits stable over 10-20 yrs); "
+            "(2) Consumer Utility vs. Price Gap (Buffett's Apple test: families would give up a $35,000 second car before a $1,000 iPhone); "
+            "(3) Hypothetical Competitor Test ('Would I wrestle a grizzly bear rather than compete with Mrs. B?'); "
+            "(4) Economic Goodwill (high ROIC on tangible assets = best inflation shield, like See's Candies) vs. Fake Accounting Goodwill ('capitalized adrenaline' from overpriced M&A)."
         ),
         "bg": (
-            "[Реф. 03 - Икономически ров, Франчайз & Икономически Goodwill]: "
-            "Оцени 5-те вида ров (Нематериални активи/Бранд, Най-ниски разходи, Разходи за смяна [NRR>120%], Мрежов ефект, Ефективен мащаб) и посоката му (Разширяващ се/Стабилен/Стесняващ се). "
-            "Разграничи Икономически Goodwill (висок ROIC върху малко материални активи — най-добрата защита от инфлация като See's Candies) от Фалшив счетоводен Goodwill („капитализиран адреналин“ от скъпи придобивания с нисък ROIC)."
+            "[Реф. 03 - Икономически ров, Филтър за скорост на промяна, Потребителска полезност & Goodwill]: "
+            "Оцени 5-те вида ров и посоката му (Разширяващ се/Стабилен/Стесняващ се). "
+            "Приложи: (1) Филтър за скорост на промяна в индустрията (избягвай сектори с бърза и непредвидима промяна; търси навици, стабилни за 10–20 г.); "
+            "(2) Разлика между полезност за клиента и цена (Тестът на Бъфет за Apple: семейство би се отказало от втора кола за $35,000 преди да се откаже от iPhone); "
+            "(3) Икономически Goodwill (висок ROIC върху малко материални активи — най-добрата защита от инфлация като See's Candies) срещу Фалшив счетоводен Goodwill („капитализиран адреналин“ от скъпи придобивания)."
         ),
     },
     "management_and_capital_04_06": {
         "en": (
-            "[Ref 04 & 06 - Management Integrity, Institutional Imperative & Capital Allocation]: "
-            "3D Management Check: (1) Integrity (Newspaper Test & candidly admitting mistakes — 1-strike veto); "
-            "(2) Capital Allocation ($1 Retained Earnings Test: every $1 retained must create >=$1 market value; 5 allocation paths); "
-            "(3) Owner Mentality (shares bought with own money vs asymmetric options). "
-            "Watch for Institutional Imperative (herd M&A, empire-building, peer-benchmarking, busyness bias). "
-            "Buyback rule: smart ONLY when stock trades clearly below Intrinsic Value; value-destroying when overpriced or merely masking massive SBC dilution."
+            "[Ref 04 & 06 - Management, 'Cannibal' Buybacks, Aesop's Formula & Whole-Business Math]: "
+            "3D Management Check: (1) Integrity & Tail-Risk Aversion ('Anything times zero is zero'; 100% personal accountability on mistakes like Paramount; zero insider-conflict appearance like skipping Microsoft); "
+            "(2) Capital Allocation ($1 Retained Earnings Test & 5 paths); (3) Owner Mentality & Incentive-Caused Bias (FedEx night-shift rule). "
+            "Munger's 'Cannibal' Compounders: high-ROIC businesses retiring 2-5%+ of shares/yr below Intrinsic Value (Apple, GEICO, Japanese 5 Trading Houses at 14% earnings yield funded with 0.5% Yen debt) multiply per-share value tax-free. "
+            "Aesop's 600 BC Formula & Whole-Business Sanity Check: Look at 100% of Market Cap and ask how many years of True Owner Earnings are required to pay it back."
         ),
         "bg": (
-            "[Реф. 04 & 06 - Мениджмънт, Институционален императив & Капиталова алокация]: "
-            "3-измерна оценка на мениджмънта: (1) Почтеност (Вестникарският тест и открито признаване на грешки — вето при измама); "
-            "(2) Капиталова алокация (Тестът за $1 задържана печалба: всеки $1 задържана печалба трябва да създава >=$1 пазарна стойност); "
-            "(3) Манталитет на собственик. "
-            "Пази се от Институционалния императив (стадни скъпи придобивания, строене на империи за размер вместо стойност на акция). "
-            "Обратно изкупуване (Buybacks): умно САМО когато акцията е под Вътрешната стойност; вредно, когато е надценена или само прикрива тежък SBC."
+            "[Реф. 04 & 06 - Мениджмънт, „Канибалски“ обратни изкупувания, Формулата на Езоп & Цял бизнес]: "
+            "3-измерна оценка: (1) Почтеност и избягване на нулев риск („Всяко число по нула е нула“; 100% лична отговорност при грешки като Paramount); "
+            "(2) Капиталова алокация (Тестът за $1 задържана печалба); (3) Манталитет на собственик и Изкривяване от стимули (Incentive-Caused Bias). "
+            "„Канибалите“ на Мънгър: компании с висок ROIC, които изкупуват и унищожават 2–5%+ от акциите си годишно на разумна цена (Apple, GEICO, 5-те японски търговски къщи на ~14% доходност срещу 0.5% дълг в йени), увеличават дела ти без данък. "
+            "Формула на Езоп (600 г. пр.Хр.) & Тест за покупка на целия бизнес: Виж цялата пазарна капитализация и сметни за колко години Истински Owner Earnings се изплаща."
         ),
     },
     "financials_and_traps_05": {
         "en": (
-            "[Ref 05 - Owner Earnings, Look-Through Earnings & Accounting Traps]: "
-            "See through GAAP to economic reality: True Owner Earnings = OCF - Maintenance CapEx - SBC (never trust raw EBITDA, which pretends assets don't wear out). "
-            "Check ROIC > 15% (> WACC) without excessive leverage, Cash Conversion (OCF/NI > 90%), Net Debt/EBITDA < 2x, EBIT/Interest > 5x, and the -30% Revenue Recession Stress Test. "
-            "Watch accounting red flags: A/R or Inventory growing faster than Revenue, huge gap between 'Adjusted' and GAAP earnings, or heavy M&A goodwill with low ROIC."
+            "[Ref 05 - True Owner Earnings, Negative Working Capital & Intangible Growth OpEx]: "
+            "See through GAAP to economic reality: True Owner Earnings = OCF - Maintenance CapEx - SBC (never trust raw EBITDA). "
+            "Check: (1) Negative Working Capital / Customer-Funded Float (Payables > Receivables + Inventory, like Apple/Costco/See's/Blue Chip Stamps — growth generates cash instead of consuming working capital); "
+            "(2) Intangible Growth CapEx Expensed as OpEx (high R&D % of revenue depresses GAAP Net Income and inflates optical P/E — look at OCF & True Owner Earnings); "
+            "(3) ROIC > 15%, Cash Conversion > 90%, Net Debt/EBITDA < 2x, EBIT/Interest > 5x, -30% Revenue Stress Test, and A/R or Inventory outpacing Revenue."
         ),
         "bg": (
-            "[Реф. 05 - Owner Earnings, Прозрачни печалби & Счетоводни капани]: "
-            "Гледай икономическата реалност зад GAAP: Истински Owner Earnings = OCF − Поддържащ CapEx − SBC (не вярвай сляпо на EBITDA, която игнорира амортизацията). "
-            "Провери ROIC > 15% без прекомерен дълг, Кешова конверсия > 90%, Net Debt/EBITDA < 2x, EBIT/Лихви > 5x и стрес теста при −30% приходи. "
-            "Следи за счетоводни капани: вземания (A/R) или запаси, растящи по-бързо от приходите, и голяма разлика между „Adjusted“ и GAAP печалба."
+            "[Реф. 05 - Истински Owner Earnings, Отрицателен оборотен капитал & R&D през отчета]: "
+            "Гледай икономическата реалност зад GAAP: Истински Owner Earnings = OCF − Поддържащ CapEx − SBC. "
+            "Провери: (1) Отрицателен оборотен капитал / Финансиране от клиенти и доставчици (Задължения към доставчици > Вземания + Запаси, като при Apple/Costco/See's — растежът генерира кеш вместо да гълта оборотен капитал); "
+            "(2) Растящ CapEx, отчетен като разход (висок R&D % от приходите намалява GAAP печалбата и прави P/E оптически висок — гледай OCF и Истински Owner Earnings); "
+            "(3) ROIC > 15%, Кешова конверсия > 90%, Net Debt/EBITDA < 2x, EBIT/Лихви > 5x, стрес тест при −30% приходи и A/R или Запаси над ръста на приходите."
         ),
     },
     "philosophy_and_mental_01_02": {
         "en": (
-            "[Ref 01 & 02 - Mental Models, Circle of Competence, Inversion, Mr. Market & Tax Compounding]: "
-            "Step over 1-foot bars inside your Circle of Competence; place unpredictable businesses in the Too Hard Pile. "
-            "Apply Munger's Inversion ('Identify the top 3 ways this investment can permanently lose capital'). "
-            "Treat Mr. Market as a manic-depressive servant, never a guide; never forecast macro/market timing. "
-            "Remember Rip Van Winkle tax compounding: deferring capital gains taxes acts like an interest-free government loan (and in Bulgaria/EU, regulated UCITS ETFs like VWCE enjoy 0% CGT)."
+            "[Ref 01 & 02 - 20-Slot Punch Card, 12 Decisions in 58 Yrs, Lollapalooza & 3-Stock Rule]: "
+            "Act as if you have a lifetime 20-Slot Punch Card; across 58 years and ~400 decisions at Berkshire, only ~12 decisions (1 every 5 yrs) drove the wealth — the edge is patience ('watching paint dry') and not selling compounders. "
+            "Munger's 3-Stock vs. Know-Nothing Rule: An uninformed investor should hold a low-cost broad index ETF (VWCE/S&P 500); a focused business analyst needs only 3-6 wonderful businesses (putting money in idea #30 instead of #1 is madness). "
+            "Check for Lollapalooza Effects (3-4 forces compounding in one direction) and Rip Van Winkle tax deferral (0% CGT on EU UCITS ETFs in Bulgaria)."
         ),
         "bg": (
-            "[Реф. 01 & 02 - Ментални модели, Кръг на компетентност, Инверсия, Г-н Пазар & Сложен процент]: "
-            "Прескачай 30-сантиметрови препятствия в Кръга на компетентност; слагай непредвидимите бизнеси в купчината „Твърде трудно“. "
-            "Прилагай Инверсията на Мънгър („Кои са 3-те начина тази инвестиция да ми донесе трайна загуба?“). "
-            "Г-н Пазар е твой слуга, не учител; не гадай макрото. Помни данъчния ефект „Рип Ван Уинкъл“: дългосрочното държане спестява данъци върху сложния процент (а в България UCITS ETF-и като VWCE са с 0% данък печалба)."
+            "[Реф. 01 & 02 - Перфокарта с 20 дупки, 12 решения за 58 г., Ефект Лолапалуза & Правилото за 3 акции]: "
+            "Действай сякаш имаш Перфокарта с 20 инвестиции за цял живот; за 58 години и ~400 решения в Berkshire само ~12 решения (по 1 на 5 г.) са създали богатството — тайната е търпението и задържането на победителите. "
+            "Двупистовото правило на Мънгър и Бъфет: Непрофесионалистът печели най-много с широк индексен ETF с ниска такса (VWCE / S&P 500); фокусираният анализатор се нуждае само от 3–6 велики бизнеса (пари в идея №30 вместо в №1 е безумие). "
+            "Търси Ефекта Лолапалуза (3–4 сили в една посока) и данъчния ефект „Рип Ван Уинкъл“ (0% данък за UCITS ETF в България)."
         ),
     },
 }
@@ -515,6 +520,38 @@ def evaluate_industry_playbook_checks(
             f"✅ *Дисциплиниран софтуерен/тех модел:* Нисък SBC (`{sbc_pct:.1f}%` от OCF)"
             if is_bg
             else f"✅ *Disciplined Tech Compensation:* Low SBC (`{sbc_pct:.1f}%` of OCF)"
+        )
+
+    if deep.get("is_cannibal"):
+        sc_val = deep.get("share_change_pct") or 0.0
+        extra_notes.append(
+            f"🦈 *„Канибал“ по Мънгър (Cannibal Stock):* Изкупени и унищожени `{sc_val:+.1f}%` от акциите при висок ROIC — делът ти расте автоматично без данък"
+            if is_bg
+            else f"🦈 *Munger 'Cannibal' Compounder:* Retired `{sc_val:+.1f}%` of shares at high ROIC — tax-free per-share ownership growth"
+        )
+
+    if deep.get("negative_working_capital"):
+        extra_notes.append(
+            "🔄 *Отрицателен оборотен капитал (Blue Chip / Apple ефект):* Клиентите и доставчиците финансират растежа без нужда от нов капитал"
+            if is_bg
+            else "🔄 *Negative Working Capital Float (Blue Chip / Apple effect):* Customers & suppliers fund growth with zero working-capital drag"
+        )
+
+    rd_pct = deep.get("rd_pct_of_rev")
+    if rd_pct is not None and rd_pct >= 10.0:
+        extra_notes.append(
+            f"🧪 *Скрит растеж през отчета (R&D: `{rd_pct:.1f}%` от приходите):* Инвестициите за бъдещ растеж минават като текущ разход и правят GAAP P/E оптически по-висок"
+            if is_bg
+            else f"🧪 *Intangible Growth Expensed as OpEx (R&D: `{rd_pct:.1f}%` of revenue):* Growth investments run through the income statement, making GAAP P/E look optically higher"
+        )
+
+    payback_yrs = deep.get("whole_business_payback_yrs")
+    if payback_yrs is not None:
+        pb_icon = "✅" if payback_yrs <= 22.0 else ("🟡" if payback_yrs <= 32.0 else "⚠️")
+        extra_notes.append(
+            f"{pb_icon} *Тест за покупка на 100% от бизнеса (Езоп / Бъфет):* Пазарната кап. се изплаща за `~{payback_yrs:.1f} г.` чрез Истински Owner Earnings"
+            if is_bg
+            else f"{pb_icon} *Whole-Business Payback Test (Aesop / Buffett):* 100% of Market Cap pays back in `~{payback_yrs:.1f} yrs` of True Owner Earnings"
         )
 
     return {

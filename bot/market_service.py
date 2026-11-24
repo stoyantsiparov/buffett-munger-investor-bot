@@ -6,6 +6,7 @@ import math
 import yfinance as yf
 from sqlalchemy.orm import Session
 from bot.models import WatchlistItem
+from bot.sec_edgar import fetch_sec_edgar_annual_series
 
 
 def fetch_stock_fundamentals(ticker: str) -> dict:
@@ -164,7 +165,7 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         bs = t.balance_sheet
         cf = t.cashflow
     except Exception:
-        return {}
+        inc = bs = cf = None
 
     revs = _df_series(inc, ("Total Revenue", "Operating Revenue"))
     gross_profits = _df_series(inc, ("Gross Profit",))
@@ -175,6 +176,7 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
     tax_rates = _df_series(inc, ("Tax Rate For Calcs",))
     net_incomes = _df_series(inc, ("Net Income", "Net Income Common Stockholders"))
     dil_shares = _df_series(inc, ("Diluted Average Shares",))
+    rds = _df_series(inc, ("Research And Development",))
 
     debts = _df_series(bs, ("Total Debt", "Long Term Debt And Capital Lease Obligation"))
     equities = _df_series(bs, ("Stockholders Equity", "Common Stock Equity"))
@@ -182,6 +184,7 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
     ord_shares = _df_series(bs, ("Ordinary Shares Number", "Share Issued"))
     receivables = _df_series(bs, ("Accounts Receivable", "Receivables"))
     inventories = _df_series(bs, ("Inventory",))
+    payables = _df_series(bs, ("Accounts Payable", "Payables And Accrued Expenses"))
     goodwills = _df_series(bs, ("Goodwill", "Goodwill And Other Intangible Assets"))
 
     ocfs = _df_series(cf, ("Operating Cash Flow", "Cash Flow From Continuing Operating Activities"))
@@ -189,6 +192,49 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
     das = _df_series(cf, ("Depreciation And Amortization", "Depreciation Amortization Depletion"))
     sbcs = _df_series(cf, ("Stock Based Compensation",))
     divs_paid = _df_series(cf, ("Cash Dividends Paid", "Common Stock Dividend Paid"))
+
+    # v1.3.0: Official US SEC EDGAR 10-K XBRL cross-verification & cloud-IP fallback
+    data_source = "yfinance"
+    sec_data = {}
+    if "." not in clean_symbol or clean_symbol.endswith((".A", ".B", "-A", "-B")):
+        sec_data = fetch_sec_edgar_annual_series(clean_symbol)
+    if sec_data:
+        data_source = "SEC EDGAR 10-K + yfinance" if revs else "SEC EDGAR 10-K"
+        if info_metrics is not None and sec_data.get("entity_name") and info_metrics.get("name") in (None, "", clean_symbol):
+            info_metrics["name"] = sec_data["entity_name"]
+        if not revs and sec_data.get("revs"):
+            revs = sec_data["revs"]
+        if not gross_profits and sec_data.get("gross_profits"):
+            gross_profits = sec_data["gross_profits"]
+        if not op_incomes and sec_data.get("op_incomes"):
+            op_incomes = sec_data["op_incomes"]
+            if not ebits:
+                ebits = op_incomes
+        if not net_incomes and sec_data.get("net_incomes"):
+            net_incomes = sec_data["net_incomes"]
+        if not ocfs and sec_data.get("ocfs"):
+            ocfs = sec_data["ocfs"]
+        if not capexs and sec_data.get("capexs"):
+            capexs = sec_data["capexs"]
+        if not das and sec_data.get("das"):
+            das = sec_data["das"]
+        if not sbcs and sec_data.get("sbcs"):
+            sbcs = sec_data["sbcs"]
+        if not equities and sec_data.get("equities"):
+            equities = sec_data["equities"]
+        if not debts and sec_data.get("debts"):
+            debts = sec_data["debts"]
+        if not cashes and sec_data.get("cashes"):
+            cashes = sec_data["cashes"]
+        if not int_exps and sec_data.get("int_exps"):
+            int_exps = sec_data["int_exps"]
+        if not rds and sec_data.get("rds"):
+            rds = sec_data["rds"]
+        if not dil_shares and sec_data.get("shares"):
+            dil_shares = sec_data["shares"]
+
+    if not revs and not net_incomes and not ocfs:
+        return {}
 
     # Build year-indexed maps
     rev_by_yr = dict(revs)
@@ -302,10 +348,30 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         prior_avg_margin = sum(op_margin_vals[1:]) / len(op_margin_vals[1:])
         margin_delta_pct = round(op_margin_vals[0] - prior_avg_margin, 1)
 
-    # 6b. (v1.2.0) CapEx Intensity (CapEx / D&A & CapEx / OCF), Accounting Goodwill %, A/R & Inventory Bloat, and $1 Retained Earnings Test
+    # 6b. (v1.2.0 / v1.3.0) CapEx Intensity, Accounting Goodwill %, A/R & Inventory Bloat, $1 Test,
+    # Munger "Cannibal" Buybacks, Negative Working Capital Float, R&D Growth OpEx %, and Whole-Business Payback
     capex_to_da_ratio = round(latest_capex / latest_da, 2) if (latest_da > 0 and latest_capex > 0) else None
     capex_pct_of_ocf = round((latest_capex / latest_ocf) * 100.0, 1) if (latest_ocf and latest_ocf > 0) else None
     capex_pct_of_rev = round((latest_capex / latest_rev) * 100.0, 1) if (latest_rev and latest_rev > 0) else None
+
+    latest_rd = abs(rds[0][1]) if rds else 0.0
+    rd_pct_of_rev = round((latest_rd / latest_rev) * 100.0, 1) if (latest_rd > 0 and latest_rev > 0) else None
+
+    latest_ap = abs(payables[0][1]) if payables else 0.0
+    latest_ar = abs(receivables[0][1]) if receivables else 0.0
+    latest_inv = abs(inventories[0][1]) if inventories else 0.0
+    negative_working_capital = bool(
+        not is_bank_or_insurer
+        and latest_ap > 0
+        and latest_ap > (latest_ar + latest_inv) * 1.05
+    )
+
+    eff_roic_or_roe = avg_roe_pct if is_bank_or_insurer else avg_roic_pct
+    is_cannibal = bool(
+        share_change_pct is not None
+        and share_change_pct <= -3.5
+        and (eff_roic_or_roe is None or eff_roic_or_roe >= 13.0)
+    )
 
     latest_goodwill = abs(goodwills[0][1]) if goodwills else 0.0
     latest_equity = equities[0][1] if equities else 0.0
@@ -442,7 +508,14 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         if not info_metrics.get("net_income") and latest_ni is not None:
             info_metrics["net_income"] = float(latest_ni)
 
+    whole_business_payback_yrs = (
+        round(market_cap / true_oe, 1)
+        if (not is_bank_or_insurer and true_oe and true_oe > 0 and market_cap > 0)
+        else None
+    )
+
     return {
+        "data_source": data_source,
         "is_bank_or_insurer": is_bank_or_insurer,
         "hist_years": hist_years,
         "avg_roic_pct": avg_roic_pct,
@@ -458,6 +531,10 @@ def fetch_deep_historical_metrics(ticker: str, info_metrics: dict | None = None)
         "sbc_pct_of_ocf": sbc_pct_of_ocf,
         "share_change_pct": share_change_pct,
         "share_years": share_years,
+        "is_cannibal": is_cannibal,
+        "negative_working_capital": negative_working_capital,
+        "rd_pct_of_rev": rd_pct_of_rev,
+        "whole_business_payback_yrs": whole_business_payback_yrs,
         "interest_coverage_x": interest_coverage_x,
         "stress_test_pass": stress_test_pass,
         "stress_ebit_margin_pct": stress_ebit_margin_pct,

@@ -15,6 +15,7 @@ from bot.crypto import decrypt_secret
 from bot.i18n import format_ordinal, get_lang, localize_moat
 from bot.market_service import fetch_deep_historical_metrics, fetch_stock_fundamentals
 from bot.models import PortfolioSnapshot, User, UserLoan, WatchlistItem
+from bot.news_service import fetch_live_ticker_news, format_news_context_for_ai
 from bot.playbooks import (
     build_stock_playbook_prompt_context,
     classify_industry_playbook,
@@ -22,6 +23,40 @@ from bot.playbooks import (
     select_playbooks_for_question,
 )
 from bot.t212_service import SEMICONDUCTOR_SHORT_TICKERS, parse_t212_snapshot
+
+# Per-user multi-turn conversational memory: {telegram_id: [(timestamp, question, answer_snippet), ...]}
+_USER_CHAT_HISTORY: dict[int, list[tuple[float, str, str]]] = {}
+MAX_CHAT_HISTORY_TURNS = 5
+CHAT_HISTORY_TTL_SEC = 12 * 3600
+
+
+def clear_user_chat_history(telegram_id: int) -> int:
+    """Clear stored conversational history for a user and return number of cleared turns."""
+    turns = _USER_CHAT_HISTORY.pop(int(telegram_id or 0), [])
+    return len(turns)
+
+
+def _get_recent_chat_turns(telegram_id: int) -> list[tuple[str, str]]:
+    now = time.time()
+    raw = _USER_CHAT_HISTORY.get(int(telegram_id or 0), [])
+    valid = [(ts, q, a) for ts, q, a in raw if (now - ts) <= CHAT_HISTORY_TTL_SEC]
+    if len(valid) != len(raw):
+        _USER_CHAT_HISTORY[int(telegram_id or 0)] = valid
+    return [(q, a) for _, q, a in valid[-MAX_CHAT_HISTORY_TURNS:]]
+
+
+def _append_chat_turn(telegram_id: int, question: str, answer: str) -> None:
+    if not telegram_id:
+        return
+    now = time.time()
+    valid = [
+        (ts, q, a)
+        for ts, q, a in _USER_CHAT_HISTORY.get(int(telegram_id), [])
+        if (now - ts) <= CHAT_HISTORY_TTL_SEC
+    ]
+    clean_a = " ".join((answer or "").split())[:650]
+    valid.append((now, (question or "").strip()[:300], clean_a))
+    _USER_CHAT_HISTORY[int(telegram_id)] = valid[-MAX_CHAT_HISTORY_TURNS:]
 
 BROAD_EU_ETFS = {"VWCE", "IWDA", "SXR8", "CSPX", "EUNL", "VUAA", "SPYI", "WEBN"}
 SKIP_SINGLE_STOCK_VALUATION_ETFS = BROAD_EU_ETFS | {"SEC0", "XDWU", "ESIF", "BGX", "EXX5", "QDVE", "EQQQ"}
@@ -1121,16 +1156,17 @@ def build_dynamic_investment_plan_lines(
 
 
 def format_deep_audit_lines(deep: dict | None, sym: str, lang: str = "en") -> list[str]:
-    """Render the v1.1.0 Multi-Year Historical Audit & Red-Flag Detector block in EN or BG."""
+    """Render the v1.1.0/v1.3.0 Multi-Year Historical Audit & Red-Flag Detector block in EN or BG."""
     if not deep or not deep.get("hist_years"):
         return []
     is_bg = lang == "bg"
     yrs = deep["hist_years"]
+    src_badge = f" [{deep['data_source']}]" if deep.get("data_source") else ""
     lines = [
         "",
-        f"🔬 *2. Дълбок {yrs}-годишен исторически одит & Детектор за капани:*"
+        f"🔬 *2. Дълбок {yrs}-годишен исторически одит & Детектор за капани{src_badge}:*"
         if is_bg
-        else f"🔬 *2. Deep {yrs}-Year Historical Audit & Red-Flag Detector:*",
+        else f"🔬 *2. Deep {yrs}-Year Historical Audit & Red-Flag Detector{src_badge}:*",
     ]
 
     if deep.get("is_bank_or_insurer"):
@@ -1413,6 +1449,20 @@ def analyze_stock_with_buffett(
             f"📌 *Verdict:* *{score['verdict']}*",
         ])
 
+    # v1.3.0: Fetch live news headlines (Yahoo Finance RSS + Google News RSS, 0 API keys)
+    live_news = fetch_live_ticker_news(metrics["ticker"], metrics.get("name"), limit=4)
+    if live_news:
+        header_lines.extend([
+            "",
+            "📰 *Пресни новини & Събития (На живо):*"
+            if is_bg
+            else "📰 *Live News & Regulatory Events:*",
+        ])
+        for item in live_news[:3]:
+            dt_s = f" _({item['date']})_" if item.get("date") else ""
+            clean_t = item["title"].replace("*", "").replace("_", "").replace("`", "")
+            header_lines.append(f"  • {clean_t}{dt_s}")
+
     gemini_key = _get_gemini_api_key(user=user, session=session)
     if gemini_key:
         try:
@@ -1426,24 +1476,26 @@ def analyze_stock_with_buffett(
                 if deep_metrics
                 else ""
             )
+            news_ctx_str = format_news_context_for_ai({metrics["ticker"]: live_news}) if live_news else ""
+            news_block = f"\n{news_ctx_str}" if news_ctx_str else ""
             playbook_ctx = build_stock_playbook_prompt_context(metrics, deep_metrics, lang=lang)
             if is_bg:
                 prompt = (
                     f"Анализирай {metrics['ticker']} ({metrics['name']}) по Бъфет и Мънгър.\n"
-                    f"TTM данни: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}\n"
+                    f"TTM данни: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}{news_block}\n"
                     f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
                     f"Активни Бъфет плейбуци:\n{playbook_ctx}\n"
-                    "Дай стегнато обобщение в 4 точки (до 1100 знака), прилагайки точния индустриален плейбук, многогодишния ROIC, Теста за $1, SBC/buybacks и червените флагове:\n"
-                    "1) Франчайз/Ров (вид, посока и индустриална специфика); 2) Мениджмънт ($1 тест, SBC, buybacks и институционален императив); 3) Инверсия на Мънгър (Топ 2 риска); 4) Кога да продадем (4-те критерия)."
+                    "Дай стегнато обобщение в 4 точки (до 1150 знака), коментирайки и живите новини (ако има важни събития/регулации), многогодишния ROIC, Теста за $1, канибалските buybacks/SBC и червените флагове:\n"
+                    "1) Франчайз/Ров (вид, посока и индустриална специфика); 2) Мениджмънт ($1 тест, SBC, buybacks и институционален императив); 3) Инверсия на Мънгър & Новини (Топ 2 риска); 4) Кога да продадем (4-те критерия)."
                 )
             else:
                 prompt = (
                     f"Analyze {metrics['ticker']} ({metrics['name']}) using Buffett & Munger's framework.\n"
-                    f"TTM metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}\n"
+                    f"TTM metrics: {json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))}{deep_ctx}{news_block}\n"
                     f"IV: {sym}{score['iv_low']}-{sym}{score['iv_high']}, Target Buy <= {sym}{score['target_buy']}. {portfolio_ctx}\n"
                     f"Active Buffett Playbooks:\n{playbook_ctx}\n"
-                    "Write a crisp 4-part summary (under 1100 chars), applying the industry playbook, multi-year ROIC, $1 Retained Earnings Test, SBC/buybacks & any red flags:\n"
-                    "1) Franchise/Moat (type, trend & industry specifics); 2) Management ($1 test, SBC, buybacks & institutional imperative); 3) Munger's Inversion (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
+                    "Write a crisp 4-part summary (under 1150 chars), incorporating live news/regulatory events, industry playbook, multi-year ROIC, $1 Retained Earnings Test, cannibal buybacks/SBC & any red flags:\n"
+                    "1) Franchise/Moat (type, trend & industry specifics); 2) Management ($1 test, SBC, buybacks & institutional imperative); 3) Munger's Inversion & Live News (Top 2 risks); 4) When to sell (Buffett's 4 criteria)."
                 )
             ai_text = _call_gemini_with_fallback(
                 gemini_key,
@@ -1551,29 +1603,45 @@ def ask_buffett_agent(
                 for x in unified["top3"]
             ]
 
-            # Auto-enrich with multi-year deep historical metrics & industry playbooks for up to 2 mentioned tickers
+            # Auto-enrich with multi-year deep historical metrics, live RSS news & industry playbooks
+            # Also check recent chat history so follow-up questions keep context on previously discussed tickers!
+            recent_turns = _get_recent_chat_turns(user.telegram_id)
             known_tickers = {x["ticker"] for x in unified.get("all_ranked") or []}
+            stop_words = {"ROE", "ROA", "ROIC", "OCF", "FCF", "CAPEX", "EBITDA", "GAAP", "SBC", "ETF", "UCITS", "USD", "EUR", "CGT", "APR", "TBI", "TOP", "BUY", "SELL", "MOS", "SEC", "DOJ"}
             raw_tokens = re.findall(r"\b[A-Z]{2,5}(?:\.[A-Z])?\b", question.upper())
             mentioned = [tok for tok in raw_tokens if tok in known_tickers]
             if not mentioned:
-                stop_words = {"ROE", "ROA", "ROIC", "OCF", "FCF", "CAPEX", "EBITDA", "GAAP", "SBC", "ETF", "UCITS", "USD", "EUR", "CGT", "APR", "TBI", "TOP", "BUY", "SELL", "MOS"}
                 mentioned = [tok for tok in raw_tokens if tok not in stop_words][:2]
+            if not mentioned and recent_turns:
+                prev_q = recent_turns[-1][0].upper()
+                prev_tokens = re.findall(r"\b[A-Z]{2,5}(?:\.[A-Z])?\b", prev_q)
+                mentioned = [tok for tok in prev_tokens if tok in known_tickers or tok not in stop_words][:2]
+
             deep_mentioned: dict[str, dict] = {}
             mentioned_playbooks: list[str] = []
+            ticker_news_map: dict[str, list[dict[str, str]]] = {}
             for tk in list(dict.fromkeys(mentioned))[:2]:
                 try:
                     m_tk = fetch_stock_fundamentals(tk)
                     d_tk = fetch_deep_historical_metrics(tk, m_tk)
                     pb_key = classify_industry_playbook(m_tk.get("sector"), m_tk.get("industry"), tk)
                     mentioned_playbooks.append(pb_key)
+                    t_news = fetch_live_ticker_news(tk, m_tk.get("name"), limit=4)
+                    if t_news:
+                        ticker_news_map[tk] = t_news
                     if d_tk:
                         deep_mentioned[tk] = {
+                            "src": d_tk.get("data_source"),
                             "playbook": pb_key,
                             "avg_roic_pct": d_tk.get("avg_roic_pct"),
                             "avg_roe_pct": d_tk.get("avg_roe_pct"),
                             "true_oe_b": round(d_tk["true_owner_earnings"] / 1e9, 2) if d_tk.get("true_owner_earnings") is not None else None,
                             "sbc_pct_ocf": d_tk.get("sbc_pct_of_ocf"),
                             "share_chg_pct": d_tk.get("share_change_pct"),
+                            "is_cannibal": d_tk.get("is_cannibal"),
+                            "neg_wc": d_tk.get("negative_working_capital"),
+                            "rd_pct_rev": d_tk.get("rd_pct_of_rev"),
+                            "payback_yrs": d_tk.get("whole_business_payback_yrs"),
                             "int_cov_x": d_tk.get("interest_coverage_x"),
                             "capex_da_x": d_tk.get("capex_to_da_ratio"),
                             "roiic_pct": d_tk.get("roiic_pct"),
@@ -1585,10 +1653,12 @@ def ask_buffett_agent(
                     pass
 
             deep_block = (
-                f"Multi-year deep audit for mentioned tickers: {json.dumps(deep_mentioned, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"Multi-year deep audit (SEC EDGAR 10-K + yfinance) for mentioned tickers: {json.dumps(deep_mentioned, ensure_ascii=False, separators=(',', ':'))}\n"
                 if deep_mentioned
                 else ""
             )
+            news_str = format_news_context_for_ai(ticker_news_map)
+            news_block = f"{news_str}\n" if news_str else ""
             routed_playbooks = select_playbooks_for_question(
                 question,
                 mentioned_playbooks=mentioned_playbooks,
@@ -1596,19 +1666,26 @@ def ask_buffett_agent(
             )
             playbook_block = f"Routed Buffett Reference Playbooks:\n{routed_playbooks}\n" if routed_playbooks else ""
 
+            history_block = ""
+            if recent_turns:
+                hist_lines = [f"  - User: {hq}\n    Agent: {ha}" for hq, ha in recent_turns[-3:]]
+                history_block = "Recent Conversation Memory (for follow-up continuity):\n" + "\n".join(hist_lines) + "\n"
+
             full_prompt = (
-                f"User ({user.full_name}) question: {question}\n"
+                f"{history_block}"
+                f"User ({user.full_name}) current question: {question}\n"
                 f"Profile: income €{user.monthly_income:.0f}, budget €{user.monthly_invest_budget:.0f}, "
                 f"buffer €{user.emergency_buffer_current:.0f}/€{user.emergency_buffer_target:.0f}, payday {user.payday_day}.\n"
                 f"Loans: {json.dumps(loans_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"T212 Portfolio: {json.dumps(port_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"Unified Top 3 (Watchlist vs Portfolio): {json.dumps(unified_ctx, ensure_ascii=False, separators=(',', ':'))}\n"
                 f"{deep_block}"
+                f"{news_block}"
                 f"{playbook_block}"
                 + (
-                    "Отговори стегнато за Telegram на български (до 2400 знака), с конкретни числа, прилагайки маршрутизираните Бъфет плейбуци и ясен избор дали да подсили позиция в портфейла или да добави нова от Watchlist."
+                    "Отговори стегнато за Telegram на български (до 2400 знака), с конкретни числа, живите новини (ако има) и маршрутизираните Бъфет плейбуци, с ясен избор дали да подсили позиция в портфейла или да добави нова от Watchlist."
                     if is_bg
-                    else "Answer concisely for Telegram in English (under 2400 chars), with exact numbers, applying the routed Buffett playbooks and giving a clear recommendation on whether to reinforce an existing holding or open a new Watchlist position."
+                    else "Answer concisely for Telegram in English (under 2400 chars), with exact numbers, live news (if any), and the routed Buffett playbooks, giving a clear recommendation on whether to reinforce an existing holding or open a new Watchlist position."
                 )
             )
             ai_text = _call_gemini_with_fallback(
@@ -1617,6 +1694,7 @@ def ask_buffett_agent(
                 full_prompt,
             )
             if ai_text:
+                _append_chat_turn(user.telegram_id, question, ai_text)
                 title = "🤖 *БЪФЕТ & МЪНГЪР АГЕНТ:*" if is_bg else "🤖 *BUFFETT & MUNGER AGENT:*"
                 return f"{title}\n\n{ai_text}"
         except Exception as e:

@@ -33,6 +33,7 @@ from bot.buffett_ai import (
     analyze_stock_with_buffett,
     ask_buffett_agent,
     build_dynamic_investment_plan_lines,
+    clear_user_chat_history,
     compute_quantitative_buffett_scorecard,
     evaluate_user_portfolio_undervalued,
     generate_monthly_check_report,
@@ -1786,6 +1787,19 @@ async def cmd_set_payday(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear multi-turn conversational memory for the current user."""
+    user = get_or_register_user(update.effective_user)
+    is_bg = get_lang(user) == "bg"
+    cleared = clear_user_chat_history(user.telegram_id)
+    await safe_reply(
+        update.effective_message,
+        f"🧹 *Паметта на текущия разговор е изчистена* ({cleared} предишни реплики). Можеш да започнеш нова тема!"
+        if is_bg
+        else f"🧹 *Conversation memory cleared* ({cleared} prior turns). Ready for a fresh topic!",
+    )
+
+
 async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     try:
@@ -2026,6 +2040,7 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("set_payday", "Set day of month for automated monthly report"),
         BotCommand("connect_t212", "Connect Read-Only Trading 212 API"),
         BotCommand("set_gemini_key", "Add free Gemini AI key (encrypted, no .env)"),
+        BotCommand("reset", "Clear AI conversation memory for a fresh topic"),
         BotCommand("lang", "Switch language: English (default) / Bulgarian"),
         BotCommand("help", "Full user guide & instructions"),
     ]
@@ -2116,6 +2131,7 @@ def main() -> None:
     app.add_handler(CommandHandler("del_watch", cmd_del_watch))
     app.add_handler(CommandHandler("buffett", cmd_buffett))
     app.add_handler(CommandHandler("ask", cmd_ask))
+    app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("set_loan", cmd_set_loan))
     app.add_handler(CommandHandler("set_budget", cmd_set_budget))
     app.add_handler(CommandHandler("set_buffer", cmd_set_buffer))
